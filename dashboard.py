@@ -194,11 +194,25 @@ INDEX_CONFIGS = [
 ]
 
 
+def compute_change_vs_prev_close(close: pd.Series):
+    """Seneste kurs og ændring i % mod forrige handelsdags lukkekurs (standard konvention,
+    matcher fx Jyske Bank/Nasdaq) - ikke mod dagens første kurs, som giver et misvisende tal."""
+    df = close.to_frame("close")
+    df["date"] = df.index.date
+    dates = sorted(df["date"].unique())
+    if len(dates) < 2:
+        return None
+    today, prev_date = dates[-1], dates[-2]
+    prev_close = df.loc[df["date"] == prev_date, "close"].iloc[-1]
+    last_price = df.loc[df["date"] == today, "close"].iloc[-1]
+    return last_price, (last_price / prev_close - 1) * 100
+
+
 @st.cache_data(ttl=120)
 def get_live_data(tickers: dict) -> pd.DataFrame:
-    """Henter seneste kurs og dagens ændring (live, 1-minuts opløsning) for en gruppe af tickere."""
+    """Henter seneste kurs og dagens ændring for en gruppe af tickere."""
     symbols = list(tickers.values())
-    data = yf.download(symbols, period="1d", interval="1m", group_by="ticker", progress=False)
+    data = yf.download(symbols, period="5d", interval="1m", group_by="ticker", progress=False)
 
     rows = []
     for name, symbol in tickers.items():
@@ -206,9 +220,10 @@ def get_live_data(tickers: dict) -> pd.DataFrame:
             close = data[symbol]["Close"].dropna()
             if close.empty:
                 continue
-            last_price = close.iloc[-1]
-            first_price = close.iloc[0]
-            change_pct = (last_price / first_price - 1) * 100
+            result = compute_change_vs_prev_close(close)
+            if result is None:
+                continue
+            last_price, change_pct = result
             rows.append({
                 "Selskab": name,
                 "Ticker": symbol,
@@ -251,13 +266,15 @@ def get_history_stats(tickers: dict) -> pd.DataFrame:
 def get_index_overview(index_ticker: str):
     """Henter det faktiske indeksniveau (ikke et gennemsnit af selskaberne) og dagens ændring."""
     try:
-        data = yf.download(index_ticker, period="1d", interval="1m", progress=False)
+        data = yf.download(index_ticker, period="5d", interval="1m", progress=False)
         close = data["Close"].squeeze().dropna()
         if close.empty:
             return None
-        last = float(close.iloc[-1])
-        first = float(close.iloc[0])
-        return {"last": last, "change_pct": (last / first - 1) * 100}
+        result = compute_change_vs_prev_close(close)
+        if result is None:
+            return None
+        last, change_pct = result
+        return {"last": float(last), "change_pct": float(change_pct)}
     except Exception:
         return None
 
