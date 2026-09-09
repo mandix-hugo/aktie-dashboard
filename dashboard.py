@@ -13,7 +13,11 @@ import yfinance as yf
 from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Live Aktiedashboard", layout="wide")
-st_autorefresh(interval=60_000, key="refresh")  # opdaterer hvert minut (over 700 selskaber i alt - hurtigere refresh overbelaster Yahoo Finance)
+st_autorefresh(interval=300_000, key="refresh")  # opdaterer hvert 5. minut. Med 700+ selskaber
+# plus porteføljeberegninger på tværs af valutaer kan en kold gennemkørsel tage et par minutter -
+# et kortere interval risikerer at en ny genberegning starter, før den forrige er færdig, hvilket
+# gjorde appen ustabil tidligere. Live-kurserne på Porteføljer-fanen opdateres stadig hvert 10.
+# sekund uafhængigt af dette (se @st.fragment i show_portfolio_holdings).
 
 st.markdown(
     """
@@ -874,6 +878,14 @@ PORTFOLIO_SIZE = 8  # selskaber per portefølje - et almindeligt niveau for konc
 # men stadig diversificeret forvaltning (klassisk porteføljeteori viser at langt
 # hovedparten af den selskabsspecifikke risiko er væk efter 8-20 aktier)
 
+# Hvilken valuta hvert indeks' selskaber handles i - bruges til at regne udenlandske aktier
+# om til kr. med periodens faktiske valutakurser, så en samlet porteføljeværdi giver mening.
+INDEX_CURRENCY = {
+    "C25": "DKK", "S&P 500": "USD", "Nasdaq 100": "USD", "OMXS30": "SEK", "DAX 40": "EUR",
+}
+FX_TICKERS = {"USD": "USDDKK=X", "SEK": "SEKDKK=X", "EUR": "EURDKK=X"}
+PORTFOLIO_PERIOD_OPTIONS = {"1 måned": "1mo", "6 måneder": "6mo", "1 år": "1y"}
+
 
 @st.cache_data(ttl=300)
 def get_benchmark_returns(ticker: str = "^GSPC") -> dict:
@@ -937,6 +949,92 @@ def build_correlation_universe() -> pd.DataFrame:
                 "Korrelation": round(corr, 2),
             })
     return pd.DataFrame(rows)
+
+
+def _to_tz_naive(series: pd.Series) -> pd.Series:
+    if series.index.tz is not None:
+        series = series.copy()
+        series.index = series.index.tz_localize(None)
+    return series
+
+
+@st.cache_data(ttl=300)
+def get_fx_series(currency: str, period: str) -> pd.Series:
+    """Daglig vekselkurs til DKK for en given valuta. DKK selv har ingen serie (identitet)."""
+    ticker = FX_TICKERS.get(currency)
+    if ticker is None:
+        return pd.Series(dtype=float)
+    try:
+        data = yf.download(ticker, period=period, interval="1d", progress=False)
+        close = data["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        return _to_tz_naive(close.dropna())
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+@st.cache_data(ttl=300)
+def get_price_series_dkk(ticker: str, currency: str, period: str) -> pd.Series:
+    """Daglige lukkekurser for én aktie, omregnet til DKK med periodens faktiske valutakurser -
+    så en dansk og en amerikansk aktie kan lægges sammen i én meningsfuld porteføljeværdi."""
+    try:
+        data = yf.download(ticker, period=period, interval="1d", progress=False)
+        close = data["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close = _to_tz_naive(close.dropna())
+        if currency == "DKK" or close.empty:
+            return close
+        fx = get_fx_series(currency, period)
+        if fx.empty:
+            return pd.Series(dtype=float)
+        fx_aligned = fx.reindex(close.index, method="ffill").bfill()
+        return close * fx_aligned
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def combine_series_aligned(series_list: list) -> pd.Series:
+    """Lægger flere tidsserier sammen efter først at justere dem til samme fælles datoindeks (med
+    fremad-udfyldning). Vigtigt: uden dette vil pandas' almindelige addition fejlagtigt nulstille
+    dage hvor kun nogle af markederne har handlet (fx pga. forskellige helligdage i DK/US/SE/DE) -
+    det gav i en testkørsel et minus-afkast for en portefølje, hvor begge underliggende aktier
+    reelt var steget. Løsningen er at forlænge (ffill) hver serie til unionen af alle datoer først."""
+    series_list = [s for s in series_list if s is not None and not s.empty]
+    if not series_list:
+        return pd.Series(dtype=float)
+    all_dates = sorted(set().union(*[s.index for s in series_list]))
+    aligned = [s.reindex(all_dates, method="ffill").bfill() for s in series_list]
+    return pd.concat(aligned, axis=1).sum(axis=1)
+
+
+def compute_portfolio_value_series(holdings_df: pd.DataFrame, total_investment: float, period: str) -> pd.Series:
+    """Beregner en porteføljes samlede DKK-værdi dag for dag: beløbet fordeles ligeligt på
+    selskaberne til periodens første kurs (herefter 'antal enheder' pr. selskab, som en slags
+    fiktive aktiestykker), og værdien følges derefter time-for-time med periodens reelle kurser."""
+    n = len(holdings_df)
+    if n == 0:
+        return pd.Series(dtype=float)
+    per_position = total_investment / n
+
+    def fetch_one(row):
+        currency = INDEX_CURRENCY.get(row["Kilde"], "DKK")
+        return get_price_series_dkk(row["Ticker"], currency, period)
+
+    # Hentes parallelt (24 aktier på tværs af 3 porteføljer) - ellers tager det >1 minut
+    # sekventielt, da hvert opslag involverer et separat netværkskald til Yahoo Finance.
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        price_series_list = list(executor.map(fetch_one, [row for _, row in holdings_df.iterrows()]))
+
+    series_list = []
+    for price_dkk in price_series_list:
+        if price_dkk.empty or price_dkk.iloc[0] == 0:
+            continue
+        units = per_position / price_dkk.iloc[0]
+        series_list.append(units * price_dkk)
+
+    return combine_series_aligned(series_list)
 
 
 def build_portfolios(universe_df: pd.DataFrame, n: int):
@@ -1003,6 +1101,84 @@ def show_portfolio_holdings(portfolio_defs: list, per_position: float):
     st.caption(f"Live kurser og markedsværdi opdateres hvert 10. sekund · sidst opdateret kl. {now_str} (dansk tid).")
 
 
+def show_portfolio_performance(portfolio_defs: list):
+    """Overblik: hver porteføljes samlede udvikling over tid, som ét sammenhængende afkast -
+    ikke bare enkeltaktier ved siden af hinanden. Beregnet ud fra reelle historiske kurser og
+    valutakurser, ingen fremskrivning."""
+    st.markdown("### 📈 Samlet porteføljeudvikling over tid")
+    st.caption(
+        "Hver portefølje regnet som én samlet investering: beløbet fordeles ligeligt på de "
+        f"{PORTFOLIO_SIZE} selskaber til periodens første kurs, og følges dag for dag herefter. "
+        "Udenlandske aktier er omregnet til kr. med periodens faktiske valutakurser (USD/SEK/EUR "
+        "mod DKK) - ikke en antagelse om fast kurs. Baseret på reel, historisk kursudvikling; "
+        "viser ikke og forudsiger ikke fremtidigt afkast."
+    )
+
+    period_label = st.selectbox(
+        "Periode:", list(PORTFOLIO_PERIOD_OPTIONS.keys()), index=1, key="portfolio_period"
+    )
+    period = PORTFOLIO_PERIOD_OPTIONS[period_label]
+    per_portfolio_investment = TOTAL_AUM_DKK / 3
+
+    colors = ["#2563eb", "#7c3aed", "#059669"]
+    fig = go.Figure()
+    value_series_list = []
+    summary_rows = []
+
+    with st.spinner("Beregner historisk porteføljeudvikling ud fra reelle kurser..."):
+        for (title, df_p, _), color in zip(portfolio_defs, colors):
+            value_series = compute_portfolio_value_series(df_p, per_portfolio_investment, period)
+            if value_series.empty:
+                continue
+            value_series_list.append(value_series)
+            pct_series = (value_series / value_series.iloc[0] - 1) * 100
+            fig.add_trace(go.Scatter(
+                x=pct_series.index, y=pct_series, mode="lines", name=title,
+                line=dict(color=color, width=2.5),
+            ))
+            start_val, end_val = float(value_series.iloc[0]), float(value_series.iloc[-1])
+            summary_rows.append({
+                "title": title, "start": start_val, "end": end_val,
+                "return_kr": end_val - start_val, "return_pct": (end_val / start_val - 1) * 100,
+            })
+
+    if not summary_rows:
+        st.warning("Kunne ikke beregne porteføljeudvikling lige nu. Prøv igen om lidt.")
+        return
+
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=10), height=420,
+        yaxis=dict(title="Afkast siden periodens start (%)", showgrid=True, gridcolor="rgba(128,128,128,0.15)", ticksuffix="%"),
+        xaxis=dict(showgrid=False),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    cols = st.columns(len(summary_rows))
+    for col, row in zip(cols, summary_rows):
+        col.metric(
+            row["title"],
+            format_amount_dkk(row["end"]),
+            f"{row['return_pct']:+.1f}% ({format_amount_dkk(row['return_kr'])})",
+        )
+
+    combined_series = combine_series_aligned(value_series_list)
+    if not combined_series.empty:
+        combined_start, combined_end = float(combined_series.iloc[0]), float(combined_series.iloc[-1])
+        st.markdown("**Samlet for alle 3 porteføljer**")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Samlet indskud", format_amount_dkk(combined_start))
+        m2.metric("Samlet værdi nu", format_amount_dkk(combined_end))
+        m3.metric(
+            "Samlet afkast",
+            f"{(combined_end / combined_start - 1) * 100:+.1f}%",
+            format_amount_dkk(combined_end - combined_start),
+        )
+    st.caption(f"Beregnet over perioden \"{period_label}\" · kurser og valutakurser er reelle, historiske data - senest opdateret ved sidste sideindlæsning.")
+
+
 def show_portfolios():
     st.subheader("💼 Tre porteføljer: konjunkturfølsomhed vs. selskabsspecifik risiko")
     st.caption(
@@ -1042,11 +1218,12 @@ def show_portfolios():
     st.caption(
         f"Udgangspunkt: {TOTAL_AUM_DKK:,.0f}".replace(",", ".") + " kr. i alt, fordelt ligeligt på de 3 "
         f"porteføljer (" + f"{TOTAL_AUM_DKK / 3:,.0f}".replace(",", ".") + " kr. hver) og ligevægtet på "
-        f"{PORTFOLIO_SIZE} selskaber per portefølje (~" + f"{per_position:,.0f}".replace(",", ".") +
-        " kr. per position) - beløb angivet i kr., uden hensyn til valutakursomregning for de "
-        "udenlandske selskaber."
+        f"{PORTFOLIO_SIZE} selskaber per portefølje (~" + f"{per_position:,.0f}".replace(",", ".") + " kr. per position)."
     )
 
+    show_portfolio_performance(portfolio_defs)
+    st.markdown("---")
+    st.markdown("### 📋 Beholdninger lige nu")
     show_portfolio_holdings(portfolio_defs, per_position)
 
 
