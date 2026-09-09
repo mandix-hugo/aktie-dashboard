@@ -1109,13 +1109,15 @@ def show_portfolio_performance(portfolio_defs: list):
     st.caption(
         "Hver portefølje regnet som én samlet investering: beløbet fordeles ligeligt på de "
         f"{PORTFOLIO_SIZE} selskaber til periodens første kurs, og følges dag for dag herefter. "
-        "Udenlandske aktier er omregnet til kr. med periodens faktiske valutakurser (USD/SEK/EUR "
-        "mod DKK) - ikke en antagelse om fast kurs. Baseret på reel, historisk kursudvikling; "
-        "viser ikke og forudsiger ikke fremtidigt afkast."
+        "Standard er '1 måned' - dvs. et tænkt scenarie hvor pengene blev investeret for præcis 1 "
+        "måned siden, og udviklingen siden da opdateres automatisk hver dag frem til i dag (glidende "
+        "vindue - i morgen rykker startpunktet en dag frem). Udenlandske aktier er omregnet til kr. "
+        "med periodens faktiske valutakurser (USD/SEK/EUR mod DKK) - ikke en antagelse om fast kurs. "
+        "Baseret på reel, historisk kursudvikling; viser ikke og forudsiger ikke fremtidigt afkast."
     )
 
     period_label = st.selectbox(
-        "Periode:", list(PORTFOLIO_PERIOD_OPTIONS.keys()), index=1, key="portfolio_period"
+        "Periode:", list(PORTFOLIO_PERIOD_OPTIONS.keys()), index=0, key="portfolio_period"
     )
     period = PORTFOLIO_PERIOD_OPTIONS[period_label]
     per_portfolio_investment = TOTAL_AUM_DKK / 3
@@ -1227,14 +1229,297 @@ def show_portfolios():
     show_portfolio_holdings(portfolio_defs, per_position)
 
 
+# ---------------------------------------------------------------------------
+# Boligmarked-fane: dansk ejendomsdata fra Danmarks Statistiks officielle API
+# (api.statbank.dk). Boligpriser offentliggøres i sagens natur ikke dagligt som
+# aktiekurser - en bolighandel skal tinglyses og indberettes, før den indgår i
+# statistikken, så selv de "friskeste" officielle tal er typisk et kvartal
+# gamle. Det er sådan dansk boligstatistik reelt fungerer, ikke en begrænsning
+# i selve dashboardet - se forklaringen øverst på fanen.
+# ---------------------------------------------------------------------------
+
+REGION_CODES = {
+    "Hele landet": "000", "Region Hovedstaden": "084", "Region Sjælland": "085",
+    "Region Syddanmark": "083", "Region Midtjylland": "082", "Region Nordjylland": "081",
+}
+# Landsdele er det mest detaljerede geografiske niveau, Danmarks Statistik tilbyder for
+# boligpriser - ned til kommune eller bydel (fx Valby) findes desværre ikke i deres officielle
+# prisstatistik (kun for tvangsauktioner, og kun årligt). Verificeret ved grundig gennemgang af
+# alle tabeller under emnet "Ejendomme".
+LANDSDEL_CODES = {
+    "Landsdel Byen København": "01", "Landsdel Københavns omegn": "02", "Landsdel Nordsjælland": "03",
+    "Landsdel Bornholm": "04", "Landsdel Østsjælland": "05", "Landsdel Vest- og Sydsjælland": "06",
+    "Landsdel Fyn": "07", "Landsdel Sydjylland": "08", "Landsdel Østjylland": "09",
+    "Landsdel Vestjylland": "10", "Landsdel Nordjylland": "11",
+}
+
+# Nøglerne matcher PRÆCIS den tekst Danmarks Statistiks API returnerer for hver kode - de to
+# tabeller bruger forskellig stavning for samme boligtype ("Ejerlejlighed" vs. "Ejerlejligheder,
+# i alt"), verificeret ved test. Et mismatch her ville stille give tomme resultater uden fejl.
+PROPERTY_TYPES_EJ99 = {"Enfamiliehuse": "0111", "Ejerlejlighed": "2104", "Andelsboliger": "0100"}
+PROPERTY_TYPES_EJEN77 = {"Enfamiliehuse": "0111", "Ejerlejligheder, i alt": "2103", "Sommerhuse": "0801"}
+# Nøglerne matcher igen PRÆCIS DST's egen tekst (regionerne har suffikset "(2007 -)" i denne
+# tabel specifikt, verificeret ved test) - bruges kun til at hente data korrekt, ikke til visning.
+AUCTION_TYPE_CODES = {
+    "Tvangsauktioner i alt": "5520010001", "Region Hovedstaden (2007 -)": "084",
+    "Region Sjælland (2007 -)": "085", "Region Syddanmark (2007 -)": "083",
+    "Region Midtjylland (2007 -)": "082", "Region Nordjylland (2007 -)": "081",
+}
+
+
+def fetch_dst_csv(table: str, variables: dict) -> pd.DataFrame:
+    """Henter reel, officiel data fra Danmarks Statistiks API - ingen gæt. Bemærk: API'et kræver
+    format 'CSV' eller 'JSONSTAT' - almindeligt 'JSON' fejler med en uklar fejlbesked (fundet ved
+    test). Tal parses fra dansk komma-decimal til float; '..' (manglende data) bliver til NaN."""
+    payload = {
+        "table": table, "format": "CSV", "lang": "da",
+        "variables": [{"code": code, "values": values} for code, values in variables.items()],
+    }
+    response = requests.post("https://api.statbank.dk/v1/data", json=payload, timeout=30)
+    response.raise_for_status()
+    df = pd.read_csv(io.StringIO(response.text), sep=";", encoding="utf-8")
+    df["INDHOLD"] = pd.to_numeric(df["INDHOLD"].astype(str).str.replace(",", "."), errors="coerce")
+    return df
+
+
+def quarter_to_date(q: str) -> pd.Timestamp:
+    year, q_num = int(q[:4]), int(q[5])
+    return pd.Timestamp(year=year, month=(q_num - 1) * 3 + 1, day=1)
+
+
+def month_to_date(m: str) -> pd.Timestamp:
+    return pd.Timestamp(year=int(m[:4]), month=int(m[5:7]), day=1)
+
+
+@st.cache_data(ttl=300)  # tjekkes lige så ofte som resten af appen - selve DST-tallene skifter kun kvartalsvis, men vi vil fange en ny offentliggørelse med det samme
+def get_price_index_history() -> pd.DataFrame:
+    """Prisindeks (2015=100) for hele landet, kvartalsvis siden 2015, pr. boligtype."""
+    try:
+        df = fetch_dst_csv("EJ99", {
+            "OMRÅDE": ["00"], "BOLTYP": list(PROPERTY_TYPES_EJ99.values()), "ENHED": ["100"], "Tid": ["*"],
+        })
+        return df.rename(columns={"BOLTYP": "Boligtype", "TID": "Kvartal", "INDHOLD": "Indeks"}).dropna(subset=["Indeks"])
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_price_index_changes() -> pd.DataFrame:
+    """Udvikling i procent (kvartal-til-kvartal og år-til-år) pr. boligtype, hele historikken -
+    seneste (ikke-manglende) værdi pr. boligtype findes i visningskoden, da den absolut nyeste
+    periode ofte endnu ikke har en beregnet ændring (viser '..' i DST's egne data)."""
+    try:
+        df = fetch_dst_csv("EJ99", {
+            "OMRÅDE": ["00"], "BOLTYP": list(PROPERTY_TYPES_EJ99.values()), "ENHED": ["210", "310"], "Tid": ["*"],
+        })
+        return df.rename(columns={"BOLTYP": "Boligtype", "ENHED": "Måltype", "TID": "Kvartal", "INDHOLD": "Ændring"})
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_regional_prices() -> pd.DataFrame:
+    """Gennemsnitspris og antal salg pr. region OG pr. landsdel (mest detaljerede niveau DST
+    tilbyder for boligpriser), hele historikken, ved almindelig fri handel (ekskl.
+    familieoverdragelser mv., som ikke afspejler markedspriser)."""
+    try:
+        all_area_codes = list(REGION_CODES.values()) + list(LANDSDEL_CODES.values())
+        df = fetch_dst_csv("EJEN77", {
+            "OMRÅDE": all_area_codes, "EJENDOMSKATE": list(PROPERTY_TYPES_EJEN77.values()),
+            "BNØGLE": ["2", "3"], "OVERDRAG": ["1"], "Tid": ["*"],
+        })
+        return df.rename(columns={
+            "OMRÅDE": "Region", "EJENDOMSKATE": "Boligtype", "BNØGLE": "Nøgletal",
+            "TID": "Kvartal", "INDHOLD": "Værdi",
+        })
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_forced_auctions() -> pd.DataFrame:
+    """Bekendtgjorte tvangsauktioner pr. region, månedligt - den mest aktuelle boligmarkeds-
+    indikator Danmarks Statistik offentliggør (typisk kun ca. en måned gammel)."""
+    try:
+        df = fetch_dst_csv("TVANG1", {"TYPE": list(AUCTION_TYPE_CODES.values()), "Tid": ["*"]})
+        return df.rename(columns={"TYPE": "Område", "TID": "Måned", "INDHOLD": "Antal"})
+    except Exception:
+        return pd.DataFrame()
+
+
+def show_housing_market():
+    st.subheader("🏠 Dansk boligmarked")
+    st.caption(
+        "Data fra Danmarks Statistiks officielle API (api.statbank.dk) - ægte, registrerede tal, "
+        "ikke skøn eller fremskrivning. Boligpriser offentliggøres i sagens natur ikke dagligt som "
+        "aktiekurser: en bolighandel skal først tinglyses og indberettes, før den tæller med i "
+        "statistikken, så selv de 'friskeste' officielle tal her er typisk et kvartal (ca. 3-6 "
+        "måneder) gamle. Det er sådan dansk boligstatistik reelt fungerer - ikke en begrænsning i "
+        "dette dashboard. Tvangsauktions-tallene nederst er den mest opdaterede indikator, DST har. "
+        "Siden tjekker for nye tal lige så ofte som resten af dashboardet (hvert 5. minut), så en ny "
+        "kvartalsvis offentliggørelse fanges hurtigt - men selve tallene fra DST bliver kun opdateret "
+        "kvartalsvis/månedligt i virkeligheden, uanset hvor tit vi tjekker."
+    )
+
+    price_df = get_price_index_history()
+    changes_df = get_price_index_changes()
+    regional_df = get_regional_prices()
+    auctions_df = get_forced_auctions()
+
+    if price_df.empty:
+        st.warning("Kunne ikke hente boligdata fra Danmarks Statistik lige nu. Prøv igen om lidt.")
+        return
+
+    property_types = list(PROPERTY_TYPES_EJ99.keys())
+
+    st.markdown("### 📊 Seneste udvikling i priserne")
+    cols = st.columns(len(property_types))
+    for col, ptype in zip(cols, property_types):
+        sub = changes_df[changes_df["Boligtype"] == ptype] if not changes_df.empty else pd.DataFrame()
+        qoq = sub[sub["Måltype"].str.contains("kvartalet før", na=False)].dropna(subset=["Ændring"])
+        yoy = sub[sub["Måltype"].str.contains("året før", na=False)].dropna(subset=["Ændring"])
+        qoq_val = qoq["Ændring"].iloc[-1] if not qoq.empty else None
+        yoy_val = yoy["Ændring"].iloc[-1] if not yoy.empty else None
+        quarter_label = qoq["Kvartal"].iloc[-1] if not qoq.empty else "–"
+        with col:
+            st.metric(
+                ptype,
+                f"{yoy_val:+.1f}% år-til-år" if yoy_val is not None else "–",
+                f"{qoq_val:+.1f}% ift. kvartalet før" if qoq_val is not None else None,
+                help=(
+                    f"Seneste offentliggjorte tal: {quarter_label}. Kilde: Danmarks Statistik, "
+                    "tabel EJ99. Procent, ikke procentpoint."
+                ),
+            )
+    latest_quarter = price_df["Kvartal"].iloc[-1]
+    st.caption(f"Seneste kvartal med prisindeks: {latest_quarter}. Tal kan blive revideret, efterhånden som flere handler når at blive tinglyst.")
+
+    st.markdown("### 📈 Prisindeks over tid (2015 = 100)")
+    st.caption(
+        "Indeks 100 = prisniveauet i 2015. Står der 115, betyder det at prisniveauet er 15% højere "
+        "end i 2015 - et historisk mål, ikke en forudsigelse om fremtiden."
+    )
+    selected_types = st.multiselect("Boligtype:", property_types, default=property_types, key="housing_types")
+    if selected_types:
+        plot_df = price_df[price_df["Boligtype"].isin(selected_types)].copy()
+        plot_df["Dato"] = plot_df["Kvartal"].apply(quarter_to_date)
+        colors = {"Enfamiliehuse": "#2563eb", "Ejerlejlighed": "#7c3aed", "Andelsboliger": "#059669"}
+        fig = go.Figure()
+        for ptype in selected_types:
+            sub = plot_df[plot_df["Boligtype"] == ptype].sort_values("Dato")
+            fig.add_trace(go.Scatter(
+                x=sub["Dato"], y=sub["Indeks"], mode="lines", name=ptype,
+                line=dict(color=colors.get(ptype, "#888"), width=2.5),
+            ))
+        fig.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10), height=400,
+            yaxis=dict(title="Indeks (2015=100)", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+            xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig, width="stretch")
+
+    st.markdown("### 🗺️ Regional sammenligning")
+    st.caption(
+        "Gennemsnitspris ved almindelig fri handel, seneste tilgængelige kvartal. Kilde: Danmarks "
+        "Statistik, tabel EJEN77. 'Landsdele' er det mest detaljerede geografiske niveau DST "
+        "offentliggør boligpriser på - ned til kommune eller bydel (fx Valby) findes desværre ikke "
+        "i den officielle prisstatistik."
+    )
+    if not regional_df.empty:
+        col_a, col_b = st.columns([1, 1])
+        with col_a:
+            region_property = st.selectbox("Boligtype:", list(PROPERTY_TYPES_EJEN77.keys()), key="region_ptype")
+        with col_b:
+            granularity = st.radio("Niveau:", ["Regioner (5)", "Landsdele (11)"], horizontal=True, key="region_granularity")
+        area_names = list(REGION_CODES.keys())[1:] if granularity == "Regioner (5)" else list(LANDSDEL_CODES.keys())
+
+        avg_price = regional_df[
+            (regional_df["Nøgletal"] == "Gennemsnitlig pris pr. ejendom (1000 kr)")
+            & (regional_df["Boligtype"] == region_property)
+        ].dropna(subset=["Værdi"])
+        sales_count = regional_df[
+            (regional_df["Nøgletal"] == "Salg ved prisberegning (antal)")
+            & (regional_df["Boligtype"] == region_property)
+        ].dropna(subset=["Værdi"])
+
+        if not avg_price.empty:
+            latest_q = avg_price["Kvartal"].max()
+            latest_rows = avg_price[avg_price["Kvartal"] == latest_q]
+            country_row = latest_rows[latest_rows["Region"] == "Hele landet"]
+            # Kun de områder der matcher det valgte niveau (regioner ELLER landsdele), sorteret med
+            # dyreste/"mest guf" øverst - undgår at blande de to geografiske niveauer i én rangering.
+            avg_price_latest = latest_rows[latest_rows["Region"].isin(area_names)].sort_values("Værdi", ascending=False)
+            sales_latest = sales_count[sales_count["Kvartal"] == latest_q].set_index("Region")["Værdi"]
+
+            rows_html = ""
+            for rank, (_, row) in enumerate(avg_price_latest.iterrows(), start=1):
+                antal = sales_latest.get(row["Region"])
+                antal_txt = f" · {int(antal)} salg" if pd.notna(antal) else ""
+                rows_html += (
+                    '<div class="rank-row">'
+                    f'<span class="rank-num">{rank}</span>'
+                    f'<span class="rank-name">{row["Region"]}</span>'
+                    f'<span class="rank-change">{row["Værdi"]:,.0f}'.replace(",", ".")
+                    + f' t.kr.{antal_txt}</span></div>'
+                )
+            st.markdown(
+                f'<div class="rank-table" style="max-width:640px;">'
+                f'<div class="rank-title">GENNEMSNITSPRIS · {region_property.upper()} · {latest_q}</div>{rows_html}</div>',
+                unsafe_allow_html=True,
+            )
+            if not country_row.empty:
+                landsgns = country_row["Værdi"].iloc[0]
+                st.caption(f"Landsgennemsnit ({latest_q}): {landsgns:,.0f}".replace(",", ".") + " t.kr.")
+        else:
+            st.info("Ingen regionale prisdata tilgængelige for den valgte boligtype lige nu.")
+    else:
+        st.info("Regionale tal ikke tilgængelige lige nu.")
+
+    st.markdown("### ⚠️ Tvangsauktioner (mest aktuelle indikator)")
+    st.caption(
+        "Antal bekendtgjorte tvangsauktioner pr. måned - den mest opdaterede boligmarkeds-indikator "
+        "Danmarks Statistik offentliggør. Et stigende antal kan pege på et boligmarked under pres, "
+        "men er IKKE det samme som boligpriser og bør ikke tolkes som en prisprognose."
+    )
+    if not auctions_df.empty:
+        total_df = auctions_df[auctions_df["Område"] == "Tvangsauktioner i alt"].dropna(subset=["Antal"]).copy()
+        if not total_df.empty:
+            total_df["Dato"] = total_df["Måned"].apply(month_to_date)
+            total_df = total_df.sort_values("Dato").tail(36)
+            fig2 = go.Figure()
+            fig2.add_trace(go.Bar(x=total_df["Dato"], y=total_df["Antal"], marker_color="#dc2626"))
+            fig2.update_layout(
+                margin=dict(l=10, r=10, t=10, b=10), height=280,
+                yaxis=dict(title="Antal tvangsauktioner", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+                xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig2, width="stretch")
+            st.caption(f"Seneste måned med data: {total_df['Måned'].iloc[-1]} ({int(total_df['Antal'].iloc[-1])} tvangsauktioner i alt).")
+        else:
+            st.info("Ingen data om tvangsauktioner tilgængelige lige nu.")
+    else:
+        st.info("Data om tvangsauktioner ikke tilgængelige lige nu.")
+
+    st.markdown("---")
+    st.caption(
+        "Kilde: Danmarks Statistik (dst.dk), tabellerne EJ99, EJEN77 og TVANG1, hentet direkte via "
+        "det officielle API api.statbank.dk. Intet på denne fane er fremskrevet eller gættet."
+    )
+
+
 show_index_ranking(INDEX_CONFIGS)
 
-tab_labels = [build_tab_label(config) for config in INDEX_CONFIGS] + ["💼 Porteføljer"]
+tab_labels = [build_tab_label(config) for config in INDEX_CONFIGS] + ["💼 Porteføljer", "🏠 Boligmarked"]
 tabs = st.tabs(tab_labels)
 
-for tab, config in zip(tabs[:-1], INDEX_CONFIGS):
+for tab, config in zip(tabs[:-2], INDEX_CONFIGS):
     with tab:
         show_dashboard(config)
 
-with tabs[-1]:
+with tabs[-2]:
     show_portfolios()
+
+with tabs[-1]:
+    show_housing_market()
