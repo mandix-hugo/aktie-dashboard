@@ -1,6 +1,6 @@
 import html
 import io
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -34,6 +34,15 @@ st.markdown(
     .news-card { padding: 10px 14px; border-radius: 8px; background: rgba(128,128,128,0.08); margin-bottom: 8px; }
     .news-card a { text-decoration: none; font-weight: 600; }
     .news-meta { font-size: 0.78rem; opacity: 0.65; margin-top: 2px; }
+    .rank-table {
+        font-size: 0.8rem; max-width: 440px; margin-bottom: 22px;
+        border: 1px solid rgba(128,128,128,0.18); border-radius: 8px; padding: 4px 14px;
+    }
+    .rank-title { font-size: 0.72rem; opacity: 0.55; padding: 4px 0; letter-spacing: 0.02em; }
+    .rank-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; opacity: 0.85; }
+    .rank-num { opacity: 0.45; width: 12px; }
+    .rank-name { flex: 1; }
+    .rank-change { font-weight: 600; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -160,6 +169,27 @@ def get_dax_tickers() -> dict:
         return DAX_FALLBACK
 
 
+COLUMN_HELP = {
+    "Kurs": "Seneste handlede kurs, i selskabets lokale valuta.",
+    "Ændring i dag (%)": (
+        "Ændring i procent siden i går ved lukketid (forrige handelsdags lukkekurs) - ikke siden "
+        "dagens åbning. +5% betyder 5% dyrere end i går. Dette er en relativ ændring i procent, "
+        "ikke procentpoint."
+    ),
+    "Volatilitet (år, %)": (
+        "Et mål for hvor MEGET kursen typisk svinger - ikke om den stiger eller falder. Beregnet ud "
+        "fra det seneste års daglige kursudsving, skaleret op til et helt år. Eksempel: står der 44,0, "
+        "betyder det at kursen statistisk set (i ca. 2 ud af 3 år) typisk svinger +/-44% omkring sit "
+        "udgangspunkt i løbet af et år. Højere tal = mere uforudsigelig aktie, ikke nødvendigvis en "
+        "dårligere aktie."
+    ),
+    "Afkast 1 md (%)": "Den faktiske kursændring de seneste ca. 1 måned, ud fra reel historik. Ikke en forudsigelse om fremtiden.",
+    "Afkast 6 md (%)": "Den faktiske kursændring de seneste ca. 6 måneder, ud fra reel historik. Ikke en forudsigelse om fremtiden.",
+    "52u høj": "Højeste lukkekurs de seneste 52 uger (1 år).",
+    "52u lav": "Laveste lukkekurs de seneste 52 uger (1 år).",
+    "Trend": "Kursudviklingen de seneste ca. 30 handelsdage. Kun til at se retning/mønster - aksen er ikke ens på tværs af rækker.",
+}
+
 INDEX_CONFIGS = [
     {
         "key": "c25", "flag": "🇩🇰", "short_name": "C25", "full_name": "OMX Copenhagen 25",
@@ -237,9 +267,9 @@ def get_live_data(tickers: dict) -> pd.DataFrame:
 
 @st.cache_data(ttl=300)
 def get_history_stats(tickers: dict) -> pd.DataFrame:
-    """Beregner volatilitet og historisk afkast ud fra 6 måneders reelle dagskurser (ikke gæt)."""
+    """Beregner volatilitet, afkast og 52-ugers interval ud fra 1 års reelle dagskurser (ikke gæt)."""
     symbols = list(tickers.values())
-    data = yf.download(symbols, period="6mo", interval="1d", group_by="ticker", progress=False)
+    data = yf.download(symbols, period="1y", interval="1d", group_by="ticker", progress=False)
 
     rows = []
     for name, symbol in tickers.items():
@@ -249,13 +279,16 @@ def get_history_stats(tickers: dict) -> pd.DataFrame:
                 continue
             daily_returns = close.pct_change().dropna()
             volatilitet = daily_returns.std() * (252 ** 0.5) * 100
-            afkast_6mnd = (close.iloc[-1] / close.iloc[0] - 1) * 100
             afkast_1mnd = (close.iloc[-1] / close.iloc[-22] - 1) * 100 if len(close) > 22 else None
+            afkast_6mnd = (close.iloc[-1] / close.iloc[-126] - 1) * 100 if len(close) > 126 else None
             rows.append({
                 "Ticker": symbol,
                 "Volatilitet (år, %)": round(volatilitet, 1),
                 "Afkast 1 md (%)": round(afkast_1mnd, 1) if afkast_1mnd is not None else None,
-                "Afkast 6 md (%)": round(afkast_6mnd, 1),
+                "Afkast 6 md (%)": round(afkast_6mnd, 1) if afkast_6mnd is not None else None,
+                "52u høj": round(close.max(), 2),
+                "52u lav": round(close.min(), 2),
+                "Trend": close.tail(30).round(2).tolist(),
             })
         except Exception:
             continue
@@ -280,23 +313,54 @@ def get_index_overview(index_ticker: str):
 
 
 @st.cache_data(ttl=300)
-def get_news(ticker: str, limit: int = 1) -> list:
-    """Henter ægte, live nyhedsoverskrifter med kilde og link (fx Reuters/Bloomberg) via Yahoo Finance."""
+def get_news(ticker: str, limit: int = 2, max_age_hours: float = 3.0) -> list:
+    """Henter nyhedsoverskrifter fra navngivne, verificerede medier (Reuters, Bloomberg m.fl.) via
+    Yahoo Finance. Kun artikler med en sporbar kilde og link tælles som "verificeret", og kun dem der
+    er højst `max_age_hours` timer gamle tages med."""
     try:
         raw = yf.Ticker(ticker).news
+        now = datetime.now(timezone.utc)
         articles = []
-        for item in raw[:limit]:
+        for item in raw:
             content = item.get("content", {})
             title = content.get("title")
-            if not title:
-                continue
-            publisher = (content.get("provider") or {}).get("displayName", "Ukendt kilde")
+            publisher = (content.get("provider") or {}).get("displayName", "").strip()
             url = (content.get("canonicalUrl") or {}).get("url", "")
             pub_date = content.get("pubDate", "")
+            if not title or not publisher or not url or not pub_date:
+                continue
+            try:
+                published = datetime.fromisoformat(pub_date.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            age_hours = (now - published).total_seconds() / 3600
+            if not (0 <= age_hours <= max_age_hours):
+                continue
             articles.append({"title": title, "publisher": publisher, "url": url, "pub_date": pub_date})
+            if len(articles) >= limit:
+                break
         return articles
     except Exception:
         return []
+
+
+@st.cache_data(ttl=86_400)  # virksomhedsbeskrivelser ændrer sig sjældent - cache i et døgn
+def get_company_description(ticker: str) -> str:
+    """Henter en kort, reel virksomhedsbeskrivelse fra Yahoo Finance for én valgt aktie ad gangen.
+    Hentes bevidst kun on-demand (ikke for alle selskaber på én gang) - ellers ville det kræve
+    hundredvis af separate opslag og gøre dashboardet meget langsomt at indlæse."""
+    try:
+        info = yf.Ticker(ticker).info
+        summary = (info.get("longBusinessSummary") or "").strip()
+        if not summary:
+            return ""
+        sentences = summary.split(". ")
+        short = ". ".join(sentences[:3]).strip()
+        if short and not short.endswith("."):
+            short += "."
+        return short
+    except Exception:
+        return ""
 
 
 def format_relative_time(iso_str: str) -> str:
@@ -378,6 +442,34 @@ def build_tab_label(config: dict) -> str:
     return f"{config['flag']} {config['short_name']}  {arrow} {overview['change_pct']:+.1f}%"
 
 
+def show_index_ranking(configs: list):
+    """Diskret oversigt der rangerer indeksene efter dagens udvikling, bedst øverst."""
+    ranked = []
+    for config in configs:
+        overview = get_index_overview(config["index_ticker"])
+        if overview is not None:
+            ranked.append((config, overview["change_pct"]))
+    if not ranked:
+        return
+    ranked.sort(key=lambda item: item[1], reverse=True)
+
+    rows_html = ""
+    for rank, (config, change) in enumerate(ranked, start=1):
+        color = "#16a34a" if change >= 0 else "#dc2626"
+        arrow = "▲" if change >= 0 else "▼"
+        rows_html += (
+            '<div class="rank-row">'
+            f'<span class="rank-num">{rank}</span>'
+            f'<span class="rank-name">{config["flag"]} {config["full_name"]}</span>'
+            f'<span class="rank-change" style="color:{color}">{arrow} {change:+.2f}%</span>'
+            "</div>"
+        )
+    st.markdown(
+        f'<div class="rank-table"><div class="rank-title">INDEKS I DAG</div>{rows_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def show_market_status(market: dict):
     status = get_market_status(market["open"], market["close"], market["tz"])
     display_tz = ZoneInfo("Europe/Copenhagen")
@@ -417,15 +509,19 @@ def show_best_worst(df: pd.DataFrame):
 
 def show_news_section(live_df: pd.DataFrame):
     st.markdown("**📰 Markedsnyheder**")
-    st.caption("Ægte overskrifter fra verificerede medier (Reuters, Bloomberg m.fl.) via Yahoo Finance.")
+    st.caption("Kun overskrifter fra navngivne, verificerede medier (Reuters, Bloomberg m.fl.), højst 3 timer gamle.")
     top_movers = live_df.reindex(
         live_df["Ændring i dag (%)"].abs().sort_values(ascending=False).index
-    ).head(3)
+    ).head(5)
 
-    found_any = False
+    shown = 0
     for _, row in top_movers.iterrows():
-        for article in get_news(row["Ticker"], limit=1):
-            found_any = True
+        if shown >= 3:
+            break
+        for article in get_news(row["Ticker"], limit=2):
+            if shown >= 3:
+                break
+            shown += 1
             safe_title = html.escape(article["title"])
             safe_publisher = html.escape(article["publisher"])
             rel_time = format_relative_time(article["pub_date"])
@@ -438,8 +534,8 @@ def show_news_section(live_df: pd.DataFrame):
                 """,
                 unsafe_allow_html=True,
             )
-    if not found_any:
-        st.caption("Ingen nyheder fundet lige nu.")
+    if shown == 0:
+        st.caption("Ingen verificerede nyheder inden for de seneste 3 timer lige nu.")
 
 
 def style_table(df: pd.DataFrame):
@@ -452,8 +548,9 @@ def style_table(df: pd.DataFrame):
 
     styler = df.style.map(color_pct, subset=pct_cols)
     fmt = {c: "{:+.2f}" for c in pct_cols}
-    if "Kurs" in df.columns:
-        fmt["Kurs"] = "{:.2f}"
+    for col in ["Kurs", "52u høj", "52u lav"]:
+        if col in df.columns:
+            fmt[col] = "{:.2f}"
     if "Volatilitet (år, %)" in df.columns:
         fmt["Volatilitet (år, %)"] = "{:.1f}"
     return styler.format(fmt, na_rep="–")
@@ -517,21 +614,41 @@ def show_dashboard(config: dict):
         for col, (_, row) in zip(cols, top5.iterrows()):
             col.metric(row["Selskab"], f'{row["Kurs"]}', f'{row["Ændring i dag (%)"]}%')
 
-        st.caption(f"{len(full_df)} selskaber i {config['full_name']} · volatilitet og afkast er beregnet ud fra 6 måneders reel kurshistorik, ikke en forudsigelse.")
+        st.caption(
+            f"{len(full_df)} selskaber i {config['full_name']} · volatilitet og afkast er beregnet ud fra "
+            f"1 års reel kurshistorik, ikke en forudsigelse · alle tal er procent, ikke procentpoint · "
+            f"klik en kolonneoverskrift for at sortere, hold musen over (?) for forklaring."
+        )
+        column_config = {
+            col: st.column_config.NumberColumn(help=text)
+            for col, text in COLUMN_HELP.items()
+            if col in full_df.columns and col != "Trend"
+        }
+        if "Trend" in full_df.columns:
+            column_config["Trend"] = st.column_config.LineChartColumn(
+                "Trend (30 dage)", help=COLUMN_HELP["Trend"], width="small",
+            )
         st.dataframe(
             style_table(full_df.sort_values("Ændring i dag (%)", ascending=False)),
             width="stretch",
             hide_index=True,
             height=420,
+            column_config=column_config,
         )
 
-        select_col, period_col = st.columns([2, 1])
+        select_col, info_col, period_col = st.columns([2.2, 0.35, 1])
         with select_col:
             valgt_navn = st.selectbox("Vis graf for:", full_df["Selskab"], key=f"select_{config['key']}")
+        valgt_ticker = tickers[valgt_navn]
+        with info_col:
+            st.write("")
+            with st.popover("ℹ️", help=f"Hvad laver {valgt_navn}?"):
+                st.markdown(f"**{valgt_navn}** ({valgt_ticker})")
+                description = get_company_description(valgt_ticker)
+                st.write(description if description else "Ingen virksomhedsbeskrivelse tilgængelig lige nu.")
         with period_col:
             valgt_periode = st.selectbox("Periode:", list(PERIOD_OPTIONS.keys()), key=f"period_{config['key']}")
 
-        valgt_ticker = tickers[valgt_navn]
         stats_row = full_df[full_df["Selskab"] == valgt_navn]
         if not stats_row.empty:
             r = stats_row.iloc[0]
@@ -539,13 +656,15 @@ def show_dashboard(config: dict):
             vol = r.get("Volatilitet (år, %)")
             a1 = r.get("Afkast 1 md (%)")
             a6 = r.get("Afkast 6 md (%)")
-            m1.metric("Volatilitet (år, hist.)", f"{vol:.1f}%" if pd.notna(vol) else "–")
-            m2.metric("Afkast seneste måned (hist.)", f"{a1:+.1f}%" if pd.notna(a1) else "–")
-            m3.metric("Afkast seneste 6 mdr. (hist.)", f"{a6:+.1f}%" if pd.notna(a6) else "–")
+            m1.metric("Volatilitet (år, hist.)", f"{vol:.1f}%" if pd.notna(vol) else "–", help=COLUMN_HELP["Volatilitet (år, %)"])
+            m2.metric("Afkast seneste måned (hist.)", f"{a1:+.1f}%" if pd.notna(a1) else "–", help=COLUMN_HELP["Afkast 1 md (%)"])
+            m3.metric("Afkast seneste 6 mdr. (hist.)", f"{a6:+.1f}%" if pd.notna(a6) else "–", help=COLUMN_HELP["Afkast 6 md (%)"])
 
         period, interval = PERIOD_OPTIONS[valgt_periode]
         render_chart(valgt_ticker, period, interval)
 
+
+show_index_ranking(INDEX_CONFIGS)
 
 tab_labels = [build_tab_label(config) for config in INDEX_CONFIGS]
 tabs = st.tabs(tab_labels)
