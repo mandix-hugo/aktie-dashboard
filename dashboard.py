@@ -17,7 +17,7 @@ st_autorefresh(interval=300_000, key="refresh")  # opdaterer hvert 5. minut. Med
 # plus porteføljeberegninger på tværs af valutaer kan en kold gennemkørsel tage et par minutter -
 # et kortere interval risikerer at en ny genberegning starter, før den forrige er færdig, hvilket
 # gjorde appen ustabil tidligere. Live-kurserne på Porteføljer-fanen opdateres stadig hvert 10.
-# sekund uafhængigt af dette (se @st.fragment i show_portfolio_holdings).
+# sekund uafhængigt af dette (se @st.fragment i show_portfolio_positions_live).
 
 st.markdown(
     """
@@ -1104,34 +1104,6 @@ def combine_series_aligned(series_list: list) -> pd.Series:
     return pd.concat(aligned, axis=1).sum(axis=1)
 
 
-def compute_portfolio_value_series(holdings_df: pd.DataFrame, total_investment: float, period: str) -> pd.Series:
-    """Beregner en porteføljes samlede DKK-værdi dag for dag: beløbet fordeles ligeligt på
-    selskaberne til periodens første kurs (herefter 'antal enheder' pr. selskab, som en slags
-    fiktive aktiestykker), og værdien følges derefter time-for-time med periodens reelle kurser."""
-    n = len(holdings_df)
-    if n == 0:
-        return pd.Series(dtype=float)
-    per_position = total_investment / n
-
-    def fetch_one(row):
-        currency = INDEX_CURRENCY.get(row["Kilde"], "DKK")
-        return get_price_series_dkk(row["Ticker"], currency, period)
-
-    # Hentes parallelt (24 aktier på tværs af 3 porteføljer) - ellers tager det >1 minut
-    # sekventielt, da hvert opslag involverer et separat netværkskald til Yahoo Finance.
-    with ThreadPoolExecutor(max_workers=12) as executor:
-        price_series_list = list(executor.map(fetch_one, [row for _, row in holdings_df.iterrows()]))
-
-    series_list = []
-    for price_dkk in price_series_list:
-        if price_dkk.empty or price_dkk.iloc[0] == 0:
-            continue
-        units = per_position / price_dkk.iloc[0]
-        series_list.append(units * price_dkk)
-
-    return combine_series_aligned(series_list)
-
-
 def build_portfolios(universe_df: pd.DataFrame, n: int):
     """Vælger 3 x n selskaber objektivt ud fra deres korrelation med S&P 500 - ingen overlap."""
     systematic = universe_df.sort_values("Korrelation", ascending=False).head(n).copy()
@@ -1149,141 +1121,118 @@ def build_portfolios(universe_df: pd.DataFrame, n: int):
     return systematic, idiosyncratic, blend
 
 
-@st.fragment(run_every="10s")
-def show_portfolio_holdings(portfolio_defs: list, per_position: float):
-    """Live kurser og markedsværdi for porteføljernes ~24 selskaber, opdateret hvert 10. sekund.
-    Kun denne del af siden genberegnes så ofte - selve porteføljesammensætningen (baseret på
-    et års korrelationshistorik) ændrer sig naturligvis ikke fra sekund til sekund."""
-    all_tickers = {}
-    for _, df_p, _ in portfolio_defs:
-        for _, row in df_p.iterrows():
-            all_tickers[row["Selskab"]] = row["Ticker"]
+def build_holdings_detail(df_p: pd.DataFrame, per_position: float, period: str) -> pd.DataFrame:
+    """Beregner en realistisk beholdning for én portefølje: på KØBSDAGEN (periodens første
+    handelsdag) købes hele aktier for det allokerede beløb til den faktiske lukkekurs omregnet
+    til DKK - resten står som kontanter. Derefter følges hver positions værdi dag for dag.
+    Returnerer pr. selskab: købsdato, købskurs (DKK), antal aktier, kontantrest og prisserien."""
+    rows = []
+    def fetch_one(row):
+        currency = INDEX_CURRENCY.get(row["Kilde"], "DKK")
+        return get_price_series_dkk(row["Ticker"], currency, period)
 
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        price_series = list(executor.map(fetch_one, [r for _, r in df_p.iterrows()]))
+
+    for (_, row), prices in zip(df_p.iterrows(), price_series):
+        if prices.empty or prices.iloc[0] <= 0:
+            continue
+        buy_date = prices.index[0]
+        buy_price = float(prices.iloc[0])
+        n_shares = int(per_position // buy_price)
+        cash_rest = per_position - n_shares * buy_price
+        rows.append({
+            "Selskab": row["Selskab"], "Ticker": row["Ticker"], "Kilde": row["Kilde"],
+            "Korrelation": row["Korrelation"], "Købsdato": buy_date, "Købskurs_DKK": buy_price,
+            "Antal": n_shares, "Kontantrest": cash_rest, "_prices": prices,
+        })
+    return pd.DataFrame(rows)
+
+
+def portfolio_value_series_from_holdings(holdings: pd.DataFrame) -> pd.Series:
+    """Porteføljens samlede dagsværdi: Σ (antal aktier × dagskurs i DKK) + kontantrest.
+    Datoerne justeres til fælles kalender (ffill), så forskellige børslukkedage ikke giver
+    kunstige udsving - se combine_series_aligned for detaljer."""
+    if holdings.empty:
+        return pd.Series(dtype=float)
+    series_list = [row["_prices"] * row["Antal"] for _, row in holdings.iterrows()]
+    total = combine_series_aligned(series_list)
+    return total + holdings["Kontantrest"].sum()
+
+
+@st.fragment(run_every="10s")
+def show_portfolio_positions_live(all_holdings: dict, per_position: float):
+    """Live-lag (opdateres hvert 10. sekund): aktuel kurs pr. selskab ganges på det faste antal
+    aktier fra købsdagen, så man ser præcis hvor mange kroner der står i hver position lige nu."""
+    all_tickers = {}
+    for holdings in all_holdings.values():
+        for _, row in holdings.iterrows():
+            all_tickers[row["Selskab"]] = row["Ticker"]
     live_df = get_live_data_fast(all_tickers)
-    shares_df = get_shares_outstanding(all_tickers)
-    price_df = live_df.merge(shares_df, on="Ticker", how="left")
-    price_df["Markedsværdi"] = price_df["Kurs"] * price_df["Aktier udestående"]
+    live_prices = live_df.set_index("Ticker")["Kurs"] if not live_df.empty else pd.Series(dtype=float)
+    fx_now = {c: (get_fx_series(c, "1mo").iloc[-1] if not get_fx_series(c, "1mo").empty else None)
+              for c in FX_TICKERS}
 
     cols = st.columns(3)
-    for col, (title, df_p, desc) in zip(cols, portfolio_defs):
+    for col, (title, holdings) in zip(cols, all_holdings.items()):
         with col:
             st.markdown(f"**{title}**")
-            st.caption(desc)
-            merged = df_p.merge(
-                price_df[["Ticker", "Kurs", "Ændring i dag (%)", "Markedsværdi"]], on="Ticker", how="left"
-            )
-            merged["Allokeret"] = per_position
-            display_df = merged[
-                ["Selskab", "Ticker", "Kilde", "Korrelation", "Kurs", "Ændring i dag (%)", "Markedsværdi", "Allokeret"]
-            ]
-            styler = display_df.style.map(
-                lambda v: f"color: {'#16a34a' if v >= 0 else '#dc2626'}; font-weight: 600" if pd.notna(v) else "",
-                subset=["Ændring i dag (%)"],
-            ).format(
-                {
-                    "Korrelation": "{:+.2f}",
-                    "Kurs": "{:.2f}",
-                    "Ændring i dag (%)": "{:+.2f}",
-                    "Markedsværdi": format_market_cap,
-                    "Allokeret": format_amount_dkk,
+            if holdings.empty:
+                st.info("Ingen data lige nu.")
+                continue
+            display_rows = []
+            for _, row in holdings.iterrows():
+                currency = INDEX_CURRENCY.get(row["Kilde"], "DKK")
+                live_local = live_prices.get(row["Ticker"])
+                if pd.notna(live_local) and (currency == "DKK" or fx_now.get(currency)):
+                    price_dkk_now = float(live_local) * (1.0 if currency == "DKK" else float(fx_now[currency]))
+                else:
+                    price_dkk_now = float(row["_prices"].iloc[-1])  # fallback: seneste dagslukkekurs
+                value_now = row["Antal"] * price_dkk_now + row["Kontantrest"]
+                invested = row["Antal"] * row["Købskurs_DKK"] + row["Kontantrest"]
+                display_rows.append({
+                    "Selskab": row["Selskab"], "Antal": row["Antal"],
+                    "Købskurs (DKK)": row["Købskurs_DKK"], "Kurs nu (DKK)": price_dkk_now,
+                    "Værdi nu": value_now, "Afkast": value_now - invested,
+                    "Afkast %": (value_now / invested - 1) * 100 if invested > 0 else None,
+                })
+            ddf = pd.DataFrame(display_rows).sort_values("Værdi nu", ascending=False)
+            total_value = ddf["Værdi nu"].sum()
+            total_gain = ddf["Afkast"].sum()
+            styler = ddf.style.map(
+                lambda v: f"color: {'#15803d' if v >= 0 else '#b91c1c'}; font-weight: 600" if pd.notna(v) else "",
+                subset=["Afkast", "Afkast %"],
+            ).format({
+                "Købskurs (DKK)": "{:,.0f}", "Kurs nu (DKK)": "{:,.0f}",
+                "Værdi nu": lambda v: format_amount_dkk(v), "Afkast": "{:+,.0f} kr.", "Afkast %": "{:+.1f}",
+            }, na_rep="–")
+            st.dataframe(
+                styler, hide_index=True, width="stretch",
+                column_config={
+                    "Antal": st.column_config.NumberColumn(help="Antal HELE aktier købt på købsdagen for de allokerede ~" + f"{per_position:,.0f}".replace(",", ".") + " kr. Egen beregning: afrundet ned (rest står kontant)."),
+                    "Købskurs (DKK)": st.column_config.NumberColumn(help="Faktisk lukkekurs på købsdagen, omregnet til DKK med dagens valutakurs. Kilde: Yahoo Finance (kurs + valutakurs)."),
+                    "Kurs nu (DKK)": st.column_config.NumberColumn(help="Seneste handlede kurs (opdateres hvert 10. sek.) × aktuel valutakurs. Kilde: Yahoo Finance."),
+                    "Værdi nu": st.column_config.Column(help="Antal aktier × kurs nu + kontantrest fra købsdagen. Egen beregning."),
+                    "Afkast": st.column_config.Column(help="Værdi nu minus investeret beløb (aktier × købskurs + kontantrest). Egen beregning."),
+                    "Afkast %": st.column_config.NumberColumn(help="Afkast i procent af det investerede beløb. Egen beregning."),
                 },
-                na_rep="–",
             )
-            st.dataframe(styler, hide_index=True, width="stretch")
-            st.caption(f"Gns. korrelation med S&P 500: {df_p['Korrelation'].mean():+.2f}")
+            gain_pct = total_gain / (total_value - total_gain) * 100 if total_value != total_gain else 0
+            st.metric("Porteføljens værdi nu", format_amount_dkk(total_value),
+                      f"{total_gain:+,.0f} kr. ({gain_pct:+.1f}%)".replace(",", "."),
+                      help="Sum af alle positioners aktuelle værdi inkl. kontantrest. Egen beregning ud fra Yahoo Finance-kurser.")
+            st.caption(f"Gns. korrelation med S&P 500: {holdings['Korrelation'].mean():+.2f} · kontant: {format_amount_dkk(holdings['Kontantrest'].sum())}")
 
     now_str = datetime.now(ZoneInfo("Europe/Copenhagen")).strftime("%H:%M:%S")
-    st.caption(f"Live kurser og markedsværdi opdateres hvert 10. sekund · sidst opdateret kl. {now_str} (dansk tid).")
-
-
-def show_portfolio_performance(portfolio_defs: list):
-    """Overblik: hver porteføljes samlede udvikling over tid, som ét sammenhængende afkast -
-    ikke bare enkeltaktier ved siden af hinanden. Beregnet ud fra reelle historiske kurser og
-    valutakurser, ingen fremskrivning."""
-    st.markdown("### 📈 Samlet porteføljeudvikling over tid")
-    st.caption(
-        "Hver portefølje regnet som én samlet investering: beløbet fordeles ligeligt på de "
-        f"{PORTFOLIO_SIZE} selskaber til periodens første kurs, og følges dag for dag herefter. "
-        "Standard er '1 måned' - dvs. et tænkt scenarie hvor pengene blev investeret for præcis 1 "
-        "måned siden, og udviklingen siden da opdateres automatisk hver dag frem til i dag (glidende "
-        "vindue - i morgen rykker startpunktet en dag frem). Udenlandske aktier er omregnet til kr. "
-        "med periodens faktiske valutakurser (USD/SEK/EUR mod DKK) - ikke en antagelse om fast kurs. "
-        "Baseret på reel, historisk kursudvikling; viser ikke og forudsiger ikke fremtidigt afkast."
-    )
-
-    period_label = st.selectbox(
-        "Periode:", list(PORTFOLIO_PERIOD_OPTIONS.keys()), index=0, key="portfolio_period"
-    )
-    period = PORTFOLIO_PERIOD_OPTIONS[period_label]
-    per_portfolio_investment = TOTAL_AUM_DKK / 3
-
-    colors = ["#2563eb", "#7c3aed", "#059669"]
-    fig = go.Figure()
-    value_series_list = []
-    summary_rows = []
-
-    with st.spinner("Beregner historisk porteføljeudvikling ud fra reelle kurser..."):
-        for (title, df_p, _), color in zip(portfolio_defs, colors):
-            value_series = compute_portfolio_value_series(df_p, per_portfolio_investment, period)
-            if value_series.empty:
-                continue
-            value_series_list.append(value_series)
-            pct_series = (value_series / value_series.iloc[0] - 1) * 100
-            fig.add_trace(go.Scatter(
-                x=pct_series.index, y=pct_series, mode="lines", name=title,
-                line=dict(color=color, width=2.5),
-            ))
-            start_val, end_val = float(value_series.iloc[0]), float(value_series.iloc[-1])
-            summary_rows.append({
-                "title": title, "start": start_val, "end": end_val,
-                "return_kr": end_val - start_val, "return_pct": (end_val / start_val - 1) * 100,
-            })
-
-    if not summary_rows:
-        st.warning("Kunne ikke beregne porteføljeudvikling lige nu. Prøv igen om lidt.")
-        return
-
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=10, b=10), height=420,
-        yaxis=dict(title="Afkast siden periodens start (%)", showgrid=True, gridcolor="rgba(128,128,128,0.15)", ticksuffix="%"),
-        xaxis=dict(showgrid=False),
-        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        hovermode="x unified",
-    )
-    st.plotly_chart(fig, width="stretch")
-
-    cols = st.columns(len(summary_rows))
-    for col, row in zip(cols, summary_rows):
-        col.metric(
-            row["title"],
-            format_amount_dkk(row["end"]),
-            f"{row['return_pct']:+.1f}% ({format_amount_dkk(row['return_kr'])})",
-        )
-
-    combined_series = combine_series_aligned(value_series_list)
-    if not combined_series.empty:
-        combined_start, combined_end = float(combined_series.iloc[0]), float(combined_series.iloc[-1])
-        st.markdown("**Samlet for alle 3 porteføljer**")
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Samlet indskud", format_amount_dkk(combined_start))
-        m2.metric("Samlet værdi nu", format_amount_dkk(combined_end))
-        m3.metric(
-            "Samlet afkast",
-            f"{(combined_end / combined_start - 1) * 100:+.1f}%",
-            format_amount_dkk(combined_end - combined_start),
-        )
-    st.caption(f"Beregnet over perioden \"{period_label}\" · kurser og valutakurser er reelle, historiske data - senest opdateret ved sidste sideindlæsning.")
+    st.caption(f"Kurser og positionsværdier opdateres hvert 10. sekund · sidst opdateret kl. {now_str} (dansk tid).")
 
 
 def show_portfolios():
-    st.subheader("💼 Tre porteføljer: konjunkturfølsomhed vs. selskabsspecifik risiko")
-    st.caption(
-        f"Illustrativt eksempel på faktorbaseret porteføljekonstruktion for en dansk investor med "
-        f"ca. {TOTAL_AUM_DKK / 1e6:.0f} mio. kr. under forvaltning - til inspiration, ikke en "
-        f"personlig investeringsanbefaling. Selskaberne er valgt objektivt ud fra deres reelle, "
-        f"historiske korrelation med S&P 500 (proxy for den brede/amerikanske konjunktur) det "
-        f"seneste år, på tværs af alle 5 indeks - ikke et gæt om hvilke selskaber der 'burde' passe."
+    section_header(
+        "PORTEFØLJER · SYSTEMATISK VS. IDIOSYNKRATISK RISIKO",
+        "Tre modelporteføljer på 25 mio. kr.",
+        "Illustrativt og pædagogisk - ikke personlig rådgivning. Selskaberne er valgt objektivt ud "
+        "fra deres målte korrelation med S&P 500 over det seneste år, på tværs af alle 6 indeks.",
     )
 
     universe_df = build_correlation_universe()
@@ -1292,36 +1241,89 @@ def show_portfolios():
         return
 
     systematic, idiosyncratic, blend = build_portfolios(universe_df, PORTFOLIO_SIZE)
-
     portfolio_defs = [
-        (
-            "1) S – Systematiske selskaber", systematic,
-            "Høj samvariation med det brede marked: går det godt/dårligt for den amerikanske "
-            "økonomi, plejer disse selskaber at følge med.",
-        ),
-        (
-            "2) I – Idiosynkratiske selskaber", idiosyncratic,
-            "Lav samvariation med markedet: kursen styres mere af interne virksomhedsforhold "
-            "(fx nye produkter, ledelse, enkeltsager) end af konjunkturer.",
-        ),
-        (
-            "3) Blanding", blend,
-            "Moderat samvariation - hverken tydeligt konjunkturstyret eller tydeligt "
-            "selskabsspecifik, et sted midt imellem de to andre.",
-        ),
+        ("1) S – Systematiske selskaber", systematic,
+         "Høj samvariation med det brede marked - følger konjunkturerne."),
+        ("2) I – Idiosynkratiske selskaber", idiosyncratic,
+         "Lav samvariation - kursen styres mest af selskabsspecifikke forhold."),
+        ("3) Blanding", blend,
+         "Moderat samvariation - midt imellem de to andre."),
     ]
-
     per_position = TOTAL_AUM_DKK / 3 / PORTFOLIO_SIZE
-    st.caption(
-        f"Udgangspunkt: {TOTAL_AUM_DKK:,.0f}".replace(",", ".") + " kr. i alt, fordelt ligeligt på de 3 "
-        f"porteføljer (" + f"{TOTAL_AUM_DKK / 3:,.0f}".replace(",", ".") + " kr. hver) og ligevægtet på "
-        f"{PORTFOLIO_SIZE} selskaber per portefølje (~" + f"{per_position:,.0f}".replace(",", ".") + " kr. per position)."
+
+    period_label = st.selectbox("Investeringshorisont:", list(PORTFOLIO_PERIOD_OPTIONS.keys()), index=0, key="portfolio_period")
+    period = PORTFOLIO_PERIOD_OPTIONS[period_label]
+
+    # Byg beholdningerne (købsdag, antal hele aktier, kontantrest, prisserier)
+    all_holdings = {}
+    with st.spinner("Beregner beholdninger ud fra faktiske kurser på købsdagen..."):
+        for title, df_p, _ in portfolio_defs:
+            all_holdings[title] = build_holdings_detail(df_p, per_position, period)
+
+    inception_dates = [h["Købsdato"].min() for h in all_holdings.values() if not h.empty]
+    if not inception_dates:
+        st.warning("Kunne ikke hente kursdata lige nu. Prøv igen om lidt.")
+        return
+    inception = min(inception_dates)
+
+    # Tal formateres hver for sig med dansk tusindtalsseparator - må IKKE laves som en
+    # .replace(",", ".") på hele HTML-strengen, da det også ville ramme kommaer i brødteksten.
+    aum_txt = f"{TOTAL_AUM_DKK:,.0f}".replace(",", ".")
+    pos_txt = f"{per_position:,.0f}".replace(",", ".")
+    st.markdown(
+        f'''<div class="insight-box"><div class="insight-title">📌 Sådan er regnestykket sat op</div>
+        <div class="insight-line"><b>Købsdag: {inception:%d.%m.%Y}</b> (første handelsdag i den valgte horisont - vælger du en anden horisont, flytter købsdagen sig tilsvarende).</div>
+        <div class="insight-line">På købsdagen deles {aum_txt} kr. ligeligt: ~{pos_txt} kr. pr. selskab. Der købes <b>hele aktier</b> til dagens faktiske lukkekurs (omregnet til DKK med dagens valutakurs) - resten står som kontanter uden forrentning.</div>
+        <div class="insight-line">Alt afkast måles fra denne dag. Antal aktier ligger fast; kun kurserne (og valutakurserne) bevæger sig - præcis som i et rigtigt depot uden handler undervejs.</div>
+        <div class="insight-line">Kilder: kurser og valutakurser fra Yahoo Finance; korrelationer beregnet på 1 års daglige afkast mod S&P 500 (egen beregning).</div>
+        </div>''',
+        unsafe_allow_html=True,
     )
 
-    show_portfolio_performance(portfolio_defs)
-    st.markdown("---")
-    st.markdown("### 📋 Beholdninger lige nu")
-    show_portfolio_holdings(portfolio_defs, per_position)
+    # ---- Udvikling siden købsdagen -------------------------------------------
+    section_header("UDVIKLING", f"Porteføljernes værdi siden {inception:%d.%m.%Y}", "")
+    colors = ["#2563eb", "#7c3aed", "#059669"]
+    fig = go.Figure()
+    summary = []
+    for (title, _, desc), color in zip(portfolio_defs, colors):
+        holdings = all_holdings[title]
+        vs = portfolio_value_series_from_holdings(holdings)
+        if vs.empty:
+            continue
+        pct = (vs / vs.iloc[0] - 1) * 100
+        fig.add_trace(go.Scatter(x=pct.index, y=pct.values, mode="lines", name=title,
+                                 line=dict(color=color, width=2.5)))
+        summary.append({"title": title, "desc": desc, "start": float(vs.iloc[0]), "end": float(vs.iloc[-1])})
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=10), height=400,
+        yaxis=dict(title="Afkast siden købsdagen (%)", showgrid=True, gridcolor="rgba(128,128,128,0.15)", ticksuffix="%"),
+        xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), hovermode="x unified",
+    )
+    st.plotly_chart(fig, width="stretch")
+    source_note(
+        "Kilde: Yahoo Finance, daglige lukkekurser og valutakurser (USD/SEK/EUR mod DKK). Egen beregning: "
+        "Σ(antal aktier × dagskurs i DKK) + kontantrest, rebaseret til 0% på købsdagen. Grafen viser "
+        "dagslukkeværdier - tabellerne nedenfor er live."
+    )
+
+    if summary:
+        cols = st.columns(len(summary) + 1)
+        total_start = sum(s["start"] for s in summary)
+        total_end = sum(s["end"] for s in summary)
+        for col, s in zip(cols[:-1], summary):
+            gain = s["end"] - s["start"]
+            col.metric(s["title"], format_amount_dkk(s["end"]),
+                       f"{gain:+,.0f} kr. ({(s['end']/s['start']-1)*100:+.1f}%)".replace(",", "."),
+                       help=f"{s['desc']}\n\nStartværdi (købsdagen): {format_amount_dkk(s['start'])}. Egen beregning ud fra Yahoo Finance-kurser.")
+        cols[-1].metric("ALLE 3 SAMLET", format_amount_dkk(total_end),
+                        f"{total_end-total_start:+,.0f} kr. ({(total_end/total_start-1)*100:+.1f}%)".replace(",", "."),
+                        help=f"Samlet startværdi: {format_amount_dkk(total_start)} (= indskuddet på 25 mio. kr.). Egen beregning.")
+
+    # ---- Beholdninger med live positionsværdier -------------------------------
+    section_header("BEHOLDNINGER", "Hver position lige nu - antal aktier, værdi og afkast",
+                   "Antal aktier ligger fast fra købsdagen. Værdien opdateres live hvert 10. sekund.")
+    show_portfolio_positions_live(all_holdings, per_position)
 
 
 # ---------------------------------------------------------------------------
@@ -2239,20 +2241,365 @@ danske renter, så kig på Frankfurt, ikke København.**
     )
 
 
+# ---------------------------------------------------------------------------
+# Konjunktur-fane: økonomiske nøgletal for Danmark og USA fra officielle
+# kilder - DST (BNP, ledighed, forbrugertillid, inflation), BEA via DBnomics
+# (US BNP), BLS' officielle API (US ledighed og inflation) og Yahoo Finance
+# (den amerikanske rentekurve). Alle åbne API'er uden nøgler.
+# ---------------------------------------------------------------------------
+
+
+@st.cache_data(ttl=3_600)
+def get_dk_gdp_growth() -> pd.DataFrame:
+    """Dansk BNP-realvækst kvartal-til-kvartal, sæsonkorrigeret (DST NKN1) fra 1990."""
+    try:
+        df = fetch_dst_csv("NKN1", {
+            "TRANSAKT": ["B1GQK"], "PRISENHED": ["L_V"], "SÆSON": ["Y"], "Tid": ["*"],
+        })
+        df = df.dropna(subset=["INDHOLD"])
+        return df.rename(columns={"TID": "Kvartal", "INDHOLD": "Vækst"})[["Kvartal", "Vækst"]]
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3_600)
+def get_dk_unemployment() -> pd.DataFrame:
+    """Dansk bruttoledighed i pct. af arbejdsstyrken, sæsonkorrigeret (DST AUS07) fra 2007."""
+    try:
+        df = fetch_dst_csv("AUS07", {"YD": ["TOT"], "SAESONFAK": ["9"], "Tid": ["*"]})
+        df = df.dropna(subset=["INDHOLD"])
+        df["Dato"] = df["TID"].apply(month_to_date)
+        return df.rename(columns={"INDHOLD": "Ledighed"})[["Dato", "Ledighed"]]
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3_600)
+def get_dk_consumer_confidence() -> pd.DataFrame:
+    """Forbrugertillidsindikatoren (DST FORV1, nettotal) - månedligt siden 1974. Nettotal =
+    andel optimister minus andel pessimister; 0 er neutralt."""
+    try:
+        df = fetch_dst_csv("FORV1", {"INDIKATOR": ["F1"], "Tid": ["*"]})
+        df = df.dropna(subset=["INDHOLD"])
+        df["Dato"] = df["TID"].apply(month_to_date)
+        return df.rename(columns={"INDHOLD": "Tillid"})[["Dato", "Tillid"]]
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3_600)
+def get_us_gdp_growth() -> pd.DataFrame:
+    """US BNP-realvækst (annualiseret kvartalsvækst, BEA via DBnomics' åbne API) fra 1947."""
+    try:
+        r = requests.get(
+            "https://api.db.nomics.world/v22/series/BEA/NIPA-T10101/A191RL-Q?observations=1&format=json",
+            timeout=30,
+        )
+        r.raise_for_status()
+        s = r.json()["series"]["docs"][0]
+        rows = [
+            {"Kvartal": p.replace("-Q", "K"), "Vækst": float(v)}
+            for p, v in zip(s["period"], s["value"]) if v not in ("NA", None)
+        ]
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3_600)
+def get_us_bls() -> dict:
+    """US ledighed (LNS14000000) og CPI-indeks (CUUR0000SA0) fra BLS' officielle, nøglefri API.
+    API'et returnerer maks. 10 år pr. kald, så der hentes i to vinduer (2007-2016 og 2017-nu)
+    for at få samme historik som de danske ledighedstal."""
+    series = {"LNS14000000": [], "CUUR0000SA0": []}
+    year_now = datetime.now().year
+    try:
+        for start, end in [(2007, 2016), (2017, year_now)]:
+            # Op til 2 forsøg pr. vindue - ved appens kolde start kører mange netværkskald
+            # samtidig, og et enkelt timeout må ikke koste en times cached tomt resultat.
+            for attempt in range(2):
+                try:
+                    r = requests.post(
+                        "https://api.bls.gov/publicAPI/v1/timeseries/data/",
+                        json={"seriesid": list(series.keys()), "startyear": str(start), "endyear": str(end)},
+                        timeout=45,
+                    )
+                    r.raise_for_status()
+                    break
+                except Exception:
+                    if attempt == 1:
+                        raise
+            for s in r.json().get("Results", {}).get("series", []):
+                for obs in s["data"]:
+                    if not obs["period"].startswith("M") or obs["period"] == "M13":
+                        continue
+                    # BLS markerer manglende observationer med '-' (ikke tom streng) - de skal
+                    # springes over, ellers vælter float() hele hentningen.
+                    value = pd.to_numeric(obs["value"], errors="coerce")
+                    if pd.isna(value):
+                        continue
+                    series[s["seriesID"]].append({
+                        "Dato": pd.Timestamp(year=int(obs["year"]), month=int(obs["period"][1:]), day=1),
+                        "Værdi": float(value),
+                    })
+        out = {}
+        for sid, rows in series.items():
+            if not rows:
+                return {}
+            df = pd.DataFrame(rows).sort_values("Dato").drop_duplicates("Dato")
+            out[sid] = df
+        return out
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=600)
+def get_us_yield_curve() -> pd.DataFrame:
+    """Den amerikanske rentekurves hældning: 10-årig statsrente minus 3-måneders (Yahoo Finance
+    ^TNX og ^IRX, begge noteret direkte i procent). Negativt spænd (inverteret kurve) er
+    historiens mest berømte recessionsvarsel."""
+    try:
+        data = yf.download(["^TNX", "^IRX"], period="15y", interval="1wk", group_by="ticker", progress=False)
+        tnx = data["^TNX"]["Close"].dropna()
+        irx = data["^IRX"]["Close"].dropna()
+        common = tnx.index.intersection(irx.index)
+        spread = (tnx[common] - irx[common]).dropna()
+        return pd.DataFrame({"Dato": spread.index, "Spænd": spread.values})
+    except Exception:
+        return pd.DataFrame()
+
+
+def show_business_cycle():
+    section_header(
+        "MAKROØKONOMI · DANMARK & USA",
+        "Økonomiske konjunkturer",
+        "Vækst, arbejdsmarked, tillid og recessionssignaler - de tal, professionelle investorer "
+        "bruger til at placere økonomien i konjunkturcyklussen. Aktiemarkedet handler på dem hver dag.",
+    )
+
+    dk_gdp = get_dk_gdp_growth()
+    dk_unemp = get_dk_unemployment()
+    dk_conf = get_dk_consumer_confidence()
+    us_gdp = get_us_gdp_growth()
+    us_bls = get_us_bls()
+    if not us_bls:
+        get_us_bls.clear()  # cach ikke en fejl - prøv igen ved næste opdatering
+    curve = get_us_yield_curve()
+    inflation_dk, inflation_dk_month = get_dk_inflation()
+
+    # ---- 1) Temperatur: KPI-række DK vs USA -----------------------------------
+    section_header("1 · TEMPERATUR", "Økonomien lige nu", "")
+    col_dk, col_us = st.columns(2)
+    with col_dk:
+        st.markdown("**🇩🇰 Danmark**")
+        m1, m2 = st.columns(2)
+        if not dk_gdp.empty:
+            m1.metric(
+                "BNP-vækst (k/k)", f"{dk_gdp['Vækst'].iloc[-1]:+.1f}%",
+                f"{dk_gdp['Kvartal'].iloc[-1]}",
+                help="Realvækst i BNP i forhold til kvartalet før, sæsonkorrigeret.\n\nKilde: Danmarks Statistik NKN1. DST's eget tal - ingen egen beregning. OBS: dansk konvention er IKKE-annualiseret - kan ikke sammenlignes direkte med det amerikanske tal uden omregning (se BNP-grafen, hvor begge er omregnet til samme konvention).",
+            )
+        if not dk_unemp.empty:
+            m2.metric(
+                "Ledighed", f"{dk_unemp['Ledighed'].iloc[-1]:.1f}%",
+                f"pr. {dk_unemp['Dato'].iloc[-1]:%b %Y}",
+                help="Bruttoledige i pct. af arbejdsstyrken, sæsonkorrigeret.\n\nKilde: Danmarks Statistik AUS07. Rå officielt tal.",
+            )
+        m3, m4 = st.columns(2)
+        if inflation_dk is not None:
+            m3.metric(
+                "Inflation (å/å)", f"{inflation_dk:.1f}%", f"{inflation_dk_month}",
+                help="Årsstigning i forbrugerprisindekset.\n\nKilde: Danmarks Statistik PRIS01, DST's eget år-til-år-tal.",
+            )
+        if not dk_conf.empty:
+            conf_val = dk_conf["Tillid"].iloc[-1]
+            m4.metric(
+                "Forbrugertillid", f"{conf_val:+.1f}",
+                "optimisme" if conf_val > 0 else "pessimisme",
+                help="Forbrugertillidsindikatoren (nettotal): andelen af optimister minus andelen af pessimister i DST's månedlige spørgeundersøgelse. 0 = neutral, negativt = flere pessimister end optimister.\n\nKilde: Danmarks Statistik FORV1. Rå officielt tal.",
+            )
+    with col_us:
+        st.markdown("**🇺🇸 USA**")
+        m1, m2 = st.columns(2)
+        if not us_gdp.empty:
+            m1.metric(
+                "BNP-vækst (ann.)", f"{us_gdp['Vækst'].iloc[-1]:+.1f}%",
+                f"{us_gdp['Kvartal'].iloc[-1]}",
+                help="Realvækst i BNP, annualiseret kvartalsvækst (amerikansk konvention: kvartalets vækst omregnet til årstakt).\n\nKilde: Bureau of Economic Analysis (NIPA-tabel 1.1.1) via DBnomics' åbne API. Officielt tal - men bemærk konventionsforskellen til det danske k/k-tal.",
+            )
+        if us_bls.get("LNS14000000") is not None and not us_bls["LNS14000000"].empty:
+            u = us_bls["LNS14000000"]
+            m2.metric(
+                "Ledighed", f"{u['Værdi'].iloc[-1]:.1f}%",
+                f"pr. {u['Dato'].iloc[-1]:%b %Y}",
+                help="Officiel amerikansk ledighedsprocent (U-3), sæsonkorrigeret.\n\nKilde: Bureau of Labor Statistics' officielle API, serie LNS14000000. Rå officielt tal.",
+            )
+        m3, m4 = st.columns(2)
+        cpi_us = us_bls.get("CUUR0000SA0")
+        if cpi_us is not None and len(cpi_us) > 12:
+            us_infl = (cpi_us["Værdi"].iloc[-1] / cpi_us["Værdi"].iloc[-13] - 1) * 100
+            m3.metric(
+                "Inflation (å/å)", f"{us_infl:.1f}%",
+                f"pr. {cpi_us['Dato'].iloc[-1]:%b %Y}",
+                help="Årsstigning i det amerikanske forbrugerprisindeks (CPI-U).\n\nKilde: Bureau of Labor Statistics, serie CUUR0000SA0 (indeks). Egen beregning: (seneste indeks / indeks 12 måneder tidligere - 1) × 100.",
+            )
+        if not curve.empty:
+            spread_now = curve["Spænd"].iloc[-1]
+            m4.metric(
+                "Rentekurve 10å-3m", f"{spread_now:+.2f} pp",
+                "normal" if spread_now > 0 else "INVERTERET",
+                help="10-årig amerikansk statsrente minus 3-måneders. Negativt spænd (inverteret kurve) har varslet stort set alle amerikanske recessioner siden 1960'erne.\n\nKilde: Yahoo Finance, ^TNX og ^IRX (begge i procent). Egen beregning: simpel differens, i procentPOINT.",
+            )
+
+    with st.expander("🎓 Lær: konjunkturcyklussen - og hvor i den vi er"):
+        st.markdown(
+            """
+Økonomien bevæger sig i bølger: **opsving → højkonjunktur → afmatning → lavkonjunktur** (og i
+værste fald recession = to kvartaler i træk med negativ vækst). Tallene ovenfor spiller hver sin
+rolle i at placere os i cyklussen:
+
+- **Ledende indikatorer** (vender FØR økonomien): forbrugertillid, rentekurven, aktiemarkedet.
+- **Samtidige** (følger økonomien): BNP-vækst.
+- **Bagudskuende** (vender EFTER): ledighed og inflation - virksomheder fyrer først, når krisen
+  er der, og priser reagerer trægt.
+
+Klassisk mønster før en nedtur: rentekurven inverterer → tilliden falder → væksten aftager →
+ledigheden stiger. Derfor står rekkefølgen på denne side som den gør.
+            """
+        )
+
+    # ---- 2) BNP-vækst: DK vs USA (samme konvention) ---------------------------
+    section_header("2 · VÆKST", "BNP-vækst kvartal for kvartal",
+                   "Begge lande omregnet til IKKE-annualiseret k/k-vækst, så de kan sammenlignes 1:1.")
+    if not dk_gdp.empty and not us_gdp.empty:
+        us_plot = us_gdp.copy()
+        # BEA opgiver annualiseret vækst - omregnes til k/k for sammenlignelighed med DK
+        us_plot["Vækst_kk"] = ((1 + us_plot["Vækst"] / 100) ** 0.25 - 1) * 100
+        cutoff_q = "2010K1"
+        dk_plot = dk_gdp[dk_gdp["Kvartal"] >= cutoff_q]
+        us_plot = us_plot[us_plot["Kvartal"] >= cutoff_q]
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=[quarter_to_date(q) for q in dk_plot["Kvartal"]], y=dk_plot["Vækst"],
+                             name="🇩🇰 Danmark (k/k)", marker_color="rgba(185,28,28,0.7)"))
+        fig.add_trace(go.Scatter(x=[quarter_to_date(q) for q in us_plot["Kvartal"]], y=us_plot["Vækst_kk"],
+                                 mode="lines", name="🇺🇸 USA (k/k, omregnet)", line=dict(color="#1d4ed8", width=2.5)))
+        fig.add_hline(y=0, line_dash="dot", line_color="rgba(128,128,128,0.6)")
+        fig.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10), height=380,
+            yaxis=dict(title="Realvækst k/k (%)", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+            xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), hovermode="x unified",
+        )
+        st.plotly_chart(fig, width="stretch")
+        source_note(
+            "Kilder: DST NKN1 (sæsonkorrigeret realvækst k/k) og BEA NIPA 1.1.1 via DBnomics (annualiseret, "
+            "omregnet til k/k med (1+g)^(1/4)-1 - egen beregning for sammenlignelighed). Coronaudsvingene i "
+            "2020 dominerer skalaen - det er ægte data, ikke en fejl."
+        )
+
+    # ---- 3) Arbejdsmarked ------------------------------------------------------
+    section_header("3 · ARBEJDSMARKED", "Ledighed i Danmark og USA",
+                   "Bagudskuende, men den vigtigste politiske og sociale konjunkturmåler.")
+    if not dk_unemp.empty:
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=dk_unemp["Dato"], y=dk_unemp["Ledighed"], mode="lines",
+                                  name="🇩🇰 Danmark (brutto)", line=dict(color="#b91c1c", width=2.5)))
+        u = us_bls.get("LNS14000000")
+        if u is not None and not u.empty:
+            fig2.add_trace(go.Scatter(x=u["Dato"], y=u["Værdi"], mode="lines",
+                                      name="🇺🇸 USA (U-3)", line=dict(color="#1d4ed8", width=2.5)))
+        fig2.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10), height=360,
+            yaxis=dict(title="Pct. af arbejdsstyrken", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+            xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), hovermode="x unified",
+        )
+        st.plotly_chart(fig2, width="stretch")
+        source_note(
+            "Kilder: DST AUS07 (bruttoledige, sæsonkorrigeret) og BLS LNS14000000 (U-3, sæsonkorrigeret). "
+            "OBS: definitionerne er ikke identiske (dansk bruttoledighed inkluderer aktiverede; U-3 er "
+            "spørgeundersøgelsesbaseret), så sammenlign udviklingen - ikke niveauerne."
+        )
+
+    # ---- 4) Forbrugertillid -----------------------------------------------------
+    section_header("4 · TILLID", "Dansk forbrugertillid siden 1974",
+                   "Ledende indikator: husholdningernes humør vender typisk før deres forbrug.")
+    if not dk_conf.empty:
+        fig3 = go.Figure()
+        fig3.add_trace(go.Scatter(x=dk_conf["Dato"], y=dk_conf["Tillid"], mode="lines",
+                                  name="Forbrugertillid (nettotal)", line=dict(color="#0f766e", width=2)))
+        fig3.add_hline(y=0, line_dash="dot", line_color="rgba(128,128,128,0.6)")
+        fig3.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10), height=340,
+            yaxis=dict(title="Nettotal", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+            xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig3, width="stretch")
+        source_note(
+            "Kilde: Danmarks Statistik FORV1 (forbrugertillidsindikatoren, nettotal). Rå officielt tal. "
+            "En tilsvarende amerikansk serie (University of Michigan) kræver API-nøgle og er derfor udeladt - "
+            "rentekurven nedenfor er i praksis et stærkere amerikansk konjunktursignal."
+        )
+
+    # ---- 5) Recessionssignalet --------------------------------------------------
+    section_header("5 · RECESSIONSSIGNAL", "Den amerikanske rentekurve (10 år minus 3 mdr.)",
+                   "Under nul = inverteret. Historiens mest pålidelige recessionsvarsel - typisk 6-18 måneder i forvejen.")
+    if not curve.empty:
+        fig4 = go.Figure()
+        fig4.add_trace(go.Scatter(x=curve["Dato"], y=curve["Spænd"], mode="lines",
+                                  name="10å - 3m spænd", line=dict(color="#7c3aed", width=2),
+                                  fill="tozeroy", fillcolor="rgba(124,58,237,0.08)"))
+        fig4.add_hline(y=0, line_dash="dot", line_color="rgba(185,28,28,0.8)")
+        fig4.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10), height=340,
+            yaxis=dict(title="Procentpoint", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+            xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig4, width="stretch")
+        source_note(
+            "Kilde: Yahoo Finance, ugentlige observationer af ^TNX (10-årig) og ^IRX (3-måneders), begge "
+            "noteret i procent. Egen beregning: simpel differens. 15 års historik."
+        )
+        with st.expander("🎓 Lær: hvorfor en inverteret rentekurve varsler recession"):
+            st.markdown(
+                """
+Normalt kræver investorer højere rente for at binde penge i 10 år end i 3 måneder (usikkerheden
+er større). Når kurven **inverterer** - korte renter over lange - siger markedet reelt: *"vi
+forventer, at centralbanken snart bliver tvunget til at sætte renten kraftigt ned"* - og det gør
+centralbanker typisk kun, når økonomien er i problemer. Kurven inverterede før recessionerne i
+1990, 2001, 2008 og 2020 (og gav i 2022-24 sit hidtil længste falske/tidlige signal - selv de
+bedste indikatorer er ikke ufejlbarlige). For en formueforvalter er signalet ikke "sælg alt",
+men "stresstest porteføljen": Hvad sker der med gearing, likviditet og risikoaktiver, hvis
+varslet holder?
+                """
+            )
+
+    st.markdown("---")
+    st.caption(
+        "Kilder: Danmarks Statistik (NKN1, AUS07, FORV1, PRIS01), Bureau of Economic Analysis via "
+        "DBnomics, Bureau of Labor Statistics' officielle API og Yahoo Finance - alle åbne, officielle "
+        "kilder uden API-nøgler. Egne beregninger (annualiserings-omregning, US-inflation å/å, "
+        "rentekurvespænd) er dokumenteret i tooltips og kildenoter. Intet her er investeringsrådgivning."
+    )
+
+
 show_index_ranking(INDEX_CONFIGS)
 
-tab_labels = [build_tab_label(config) for config in INDEX_CONFIGS] + ["💼 Porteføljer", "🏠 Boligmarked", "🏦 Centralbanker"]
+tab_labels = [build_tab_label(config) for config in INDEX_CONFIGS] + ["💼 Porteføljer", "🏠 Boligmarked", "🏦 Centralbanker", "🔄 Konjunkturer"]
 tabs = st.tabs(tab_labels)
 
-for tab, config in zip(tabs[:-3], INDEX_CONFIGS):
+for tab, config in zip(tabs[:-4], INDEX_CONFIGS):
     with tab:
         show_dashboard(config)
 
-with tabs[-3]:
+with tabs[-4]:
     show_portfolios()
 
-with tabs[-2]:
+with tabs[-3]:
     show_housing_market()
 
-with tabs[-1]:
+with tabs[-2]:
     show_central_banks()
+
+with tabs[-1]:
+    show_business_cycle()
