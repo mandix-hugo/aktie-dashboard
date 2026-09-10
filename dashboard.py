@@ -1,5 +1,7 @@
 import html
 import io
+import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, time, timezone
 from zoneinfo import ZoneInfo
@@ -93,7 +95,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("📈 Live Aktiedashboard")
+st.title("Live Aktiedashboard")
 
 
 def section_header(eyebrow: str, title: str, sub: str = ""):
@@ -126,9 +128,9 @@ PERIOD_OPTIONS = {
     "1 år": ("1y", "1d"),
 }
 
-# C25 har fast 25 medlemmer - listen opdateres halvårligt af Nasdaq, så den holdes
-# statisk her (senest verificeret mod Nasdaqs officielle sammensætning).
-C25_TICKERS = {
+# Fallback hvis den dynamiske hentning nedenfor fejler (fx blokeret IP): kun de 25 officielle
+# C25-medlemmer, senest verificeret mod Nasdaqs egen sammensætning.
+C25_FALLBACK = {
     "A.P. Møller - Mærsk A": "MAERSK-A.CO",
     "A.P. Møller - Mærsk B": "MAERSK-B.CO",
     "AL Sydbank": "ALSYDB.CO",
@@ -155,6 +157,108 @@ C25_TICKERS = {
     "Nordea": "NDA-DK.CO",
     "Zealand Pharma": "ZEAL.CO",
 }
+C25_FALLBACK_SECTORS = {
+    "MAERSK-A.CO": "Transport & Logistik", "MAERSK-B.CO": "Transport & Logistik",
+    "ALSYDB.CO": "Finans", "AMBU-B.CO": "Sundhed", "CARL-B.CO": "Forbrugsvarer",
+    "COLO-B.CO": "Sundhed", "DSV.CO": "Transport & Logistik", "DANSKE.CO": "Finans",
+    "DEMANT.CO": "Sundhed", "FLS.CO": "Industri", "GN.CO": "Sundhed", "GMAB.CO": "Sundhed",
+    "ISS.CO": "Industri", "JYSK.CO": "Finans", "NKT.CO": "Industri", "NOVO-B.CO": "Sundhed",
+    "NSIS-B.CO": "Sundhed", "ORSTED.CO": "Energi & Forsyning", "VWS.CO": "Energi & Forsyning",
+    "PNDORA.CO": "Forbrugsvarer", "RBREW.CO": "Forbrugsvarer", "TRYG.CO": "Finans",
+    "ROCK-B.CO": "Industri", "NDA-DK.CO": "Finans", "ZEAL.CO": "Sundhed",
+}
+
+# Navnevarianter mellem Wikipedias selskabsnavne og stockanalysis.coms tickerliste, som den
+# normale normalisering ikke fanger (fx "AaB A/S" vs. det fulde navn "Aalborg Boldspilklub A/S").
+# Verificeret manuelt mod begge kilder - bruges kun til at slå tickeren op, ikke til visning.
+DK_NAME_ALIASES = {
+    "AABAS": "AALBORGBOLDSPILKLUB", "BROENDBYIF": "BROENDBYERNESIFFODBOLD",
+    "SPARNORDBANK": "SPARNORD", "BRDRAOJOHANSEN": "BROEDRENEAOJOHANSEN",
+    "DSNORDEN": "DAMPSKIBSSELSKABETNORDEN", "DJURLANDSBANK": "DJURSLANDSBANK",
+    "LUXOR": "INVESTERINGSSELSKABETLUXOR", "LAANOGSPARBANK": "LAANSPARBANK",
+}
+# Wikipedias engelske GICS-lignende sektornavne oversat til de danske labels, appen ellers bruger.
+DK_SECTOR_TRANSLATION = {
+    "Consumer Discretionary": "Forbrugsvarer", "Consumer Staples": "Forbrugsvarer",
+    "Energy": "Energi & Forsyning", "Utilities": "Energi & Forsyning",
+    "Finance": "Finans", "Healthcare": "Sundhed", "Industrials": "Industri",
+    "Real Estate": "Ejendomme", "Technology": "Teknologi", "Telecommunications": "Telekommunikation",
+}
+
+
+def _normalize_company_name(name: str) -> str:
+    name = str(name).upper()
+    name = name.replace("Æ", "AE").replace("Ø", "OE").replace("Å", "AA")
+    name = re.sub(r"\bA/S\b|\bAB\b|\bOYJ\b|\bASA\b|\bP/F\b|\bPLC\b|\bAG\b|\bHF\.?\b|\(PUBL\)", "", name)
+    return re.sub(r"[^A-Z0-9]", "", name)
+
+
+def _dk_class_suffix(symbol: str) -> str:
+    match = re.search(r"\.([AB])$", symbol)
+    return f" {match.group(1)}" if match else ""
+
+
+@st.cache_data(ttl=86_400)
+def _build_dk_universe() -> tuple:
+    """Bygger den fulde liste af selskaber på Nasdaq Copenhagens Hovedmarked (Large/Mid/Small
+    Cap - IKKE First North Growth Market, som er et separat, mere illikvidt vækstmarked).
+
+    Der findes ingen levende, gratis Nasdaq-API der skelner Hovedmarked fra First North (efterprøvet
+    - de gamle nasdaqomxnordic.com-datafeeds er nedlagt, og markedsværdi kan IKKE bruges som skel,
+    da flere Hovedmarked-selskaber har lavere markedsværdi end First North-selskaber). Derfor
+    kombineres to reelle, levende kilder:
+    1) Wikipedias liste over Nasdaq Copenhagen-selskaber, som er den eneste fundne kilde der
+       tagger hvert selskab som Large/Mid/Small Cap (dvs. Hovedmarked) - bruges KUN til hvilke
+       selskaber der findes og deres sektor, ikke til kurser.
+    2) stockanalysis.com's levende tickerliste - bruges til at bekræfte at selskabet rent faktisk
+       handles i dag og til at finde den korrekte ticker.
+    Et Wikipedia-selskab uden en bekræftet, levende matchende ticker springes over (vises ikke) -
+    typisk fordi det er afnoteret/opkøbt siden Wikipedia sidst blev opdateret (fx Topdanmark,
+    Nilfisk, SAS). Wikipedia kan omvendt mangle helt nye børsnoteringer - listen er derfor grundig,
+    men ikke nødvendigvis 100% udtømmende."""
+    try:
+        wiki_df = fetch_wiki_table("https://en.wikipedia.org/wiki/List_of_companies_listed_on_Nasdaq_Copenhagen", 1)
+        wiki_df = wiki_df.dropna(subset=["Company"])
+        wiki_df = wiki_df[wiki_df["Market cap"].astype(str).str.lower().isin(["large cap", "mid cap", "small cap"])]
+
+        sa_response = requests.get(
+            "https://stockanalysis.com/list/copenhagen-stock-exchange/", headers=WIKI_HEADERS, timeout=20,
+        )
+        sa_response.raise_for_status()
+        sa_df = pd.read_html(io.StringIO(sa_response.text))[0]
+        sa_df["Company Name"] = sa_df["Company Name"].apply(
+            lambda s: s.encode("latin1").decode("utf-8") if isinstance(s, str) else s
+        )
+        sa_df["norm"] = sa_df["Company Name"].apply(_normalize_company_name)
+
+        tickers, sectors = {}, {}
+        for _, row in wiki_df.iterrows():
+            key = _normalize_company_name(row["Company"])
+            key = DK_NAME_ALIASES.get(key, key)
+            matches = sa_df[sa_df["norm"] == key]
+            if matches.empty and len(key) >= 6:
+                matches = sa_df[sa_df["norm"].str.startswith(key[:6])]
+            if matches.empty:
+                continue
+            for _, m in matches.iterrows():
+                ticker = m["Symbol"].replace(".", "-") + ".CO"
+                name = row["Company"] + _dk_class_suffix(m["Symbol"])
+                sector = DK_SECTOR_TRANSLATION.get(row["Sector"], row["Sector"])
+                tickers[name] = ticker
+                sectors[ticker] = sector
+        if len(tickers) < 50:  # sanity-tjek - langt under det forventede niveau tyder på en fejl
+            return C25_FALLBACK, C25_FALLBACK_SECTORS
+        return tickers, sectors
+    except Exception:
+        return C25_FALLBACK, C25_FALLBACK_SECTORS
+
+
+def get_dk_tickers() -> dict:
+    return _build_dk_universe()[0]
+
+
+def get_dk_sectors() -> dict:
+    return _build_dk_universe()[1]
 
 # Fallback-lister hvis live-hentning fra Wikipedia/Slickcharts fejler (fx blokeret IP).
 SP500_FALLBACK = {
@@ -280,20 +384,6 @@ def get_dax_sectors() -> dict:
         return {}
 
 
-# Sektorer for C25 er faste, velkendte klassifikationer (ikke et gæt) - hentes ikke dynamisk,
-# da Nasdaq Copenhagen ikke har en lige så bekvem, offentlig sektor-tabel som Wikipedia.
-C25_SECTORS = {
-    "MAERSK-A.CO": "Transport & Logistik", "MAERSK-B.CO": "Transport & Logistik",
-    "ALSYDB.CO": "Finans", "AMBU-B.CO": "Sundhed", "CARL-B.CO": "Forbrugsvarer",
-    "COLO-B.CO": "Sundhed", "DSV.CO": "Transport & Logistik", "DANSKE.CO": "Finans",
-    "DEMANT.CO": "Sundhed", "FLS.CO": "Industri", "GN.CO": "Sundhed", "GMAB.CO": "Sundhed",
-    "ISS.CO": "Industri", "JYSK.CO": "Finans", "NKT.CO": "Industri", "NOVO-B.CO": "Sundhed",
-    "NSIS-B.CO": "Sundhed", "ORSTED.CO": "Energi & Forsyning", "VWS.CO": "Energi & Forsyning",
-    "PNDORA.CO": "Forbrugsvarer", "RBREW.CO": "Forbrugsvarer", "TRYG.CO": "Finans",
-    "ROCK-B.CO": "Industri", "NDA-DK.CO": "Finans", "ZEAL.CO": "Sundhed",
-}
-
-
 # Hver hjælpetekst slutter med kilde og beregningsmetode, så al dataproveniens er synlig
 # direkte i (?)-tooltippet - intet tal i dashboardet skal være uforklaret.
 COLUMN_HELP = {
@@ -309,21 +399,36 @@ COLUMN_HELP = {
         "sidste kurs - 1) × 100. Metoden er verificeret mod Jyske Banks og Nasdaqs egne tal."
     ),
     "Volatilitet (år, %)": (
-        "Et mål for hvor MEGET kursen typisk svinger - ikke om den stiger eller falder. Eksempel: står "
-        "der 44,0, betyder det at kursen statistisk set (i ca. 2 ud af 3 år) typisk svinger +/-44% "
-        "omkring sit udgangspunkt i løbet af et år. Højere tal = mere uforudsigelig aktie, ikke "
-        "nødvendigvis en dårligere aktie.\n\n"
+        "Et mål for hvor MEGET kursen historisk har svinget - ikke om den er gået op eller ned, og "
+        "ikke en forudsigelse om fremtiden. Beregnes i tre trin: (1) find kursens daglige procentvise "
+        "udsving det seneste år, (2) beregn spredningen (standardafvigelsen) af disse daglige udsving, "
+        "(3) gang op til et årligt niveau ('annualisér'), så tal for forskellige aktier kan "
+        "sammenlignes på samme skala.\n\n"
+        "Sådan tolkes tallet: står der fx 44,0, betyder det at hvis kursens historiske udsvingsmønster "
+        "gentager sig, vil kursen i omtrent 2 ud af 3 tilfælde ('68%-reglen' for en normalfordeling) "
+        "ende et sted mellem -44% og +44% i forhold til startpunktet over det kommende år - og i det "
+        "sidste 1 ud af 3 tilfælde længere ude end det. Højere tal = større og mere uforudsigelige "
+        "kursudsving (i begge retninger), ikke nødvendigvis en dårligere aktie.\n\n"
+        "Datavindue: det seneste års handelsdage (ca. 252 dage) - IKKE selskabets fulde levetid. En "
+        "aktie der har været rolig det seneste år, men urolig for flere år siden, vil vise et lavt tal "
+        "her.\n\n"
         "Kilde: Yahoo Finance, 1 års daglige lukkekurser. Egen beregning: standardafvigelse af daglige "
         "afkast × kvadratrod af 252 handelsdage (standard annualisering) × 100."
     ),
     "Afkast 1 md (%)": (
-        "Den faktiske kursændring de seneste ca. 1 måned (22 handelsdage), ud fra reel historik. Ikke "
-        "en forudsigelse.\n\nKilde: Yahoo Finance, daglige lukkekurser. Egen beregning: "
+        "Den faktiske, allerede realiserede kursændring de seneste ca. 1 måned (22 handelsdage) - "
+        "et historisk facit, IKKE en forudsigelse om det kommende afkast eller et udtryk for 'forventet "
+        "afkast'.\n\nDatavindue: de seneste 22 handelsdages lukkekurser (del af den samme 1-års-historik "
+        "som volatiliteten beregnes ud fra) - ikke hele selskabets levetid.\n\n"
+        "Kilde: Yahoo Finance, daglige lukkekurser. Egen beregning: "
         "(seneste kurs / kursen 22 handelsdage tidligere - 1) × 100."
     ),
     "Afkast 6 md (%)": (
-        "Den faktiske kursændring de seneste ca. 6 måneder (126 handelsdage), ud fra reel historik. "
-        "Ikke en forudsigelse.\n\nKilde: Yahoo Finance, daglige lukkekurser. Egen beregning: "
+        "Den faktiske, allerede realiserede kursændring de seneste ca. 6 måneder (126 handelsdage) - "
+        "et historisk facit, IKKE en forudsigelse om det kommende afkast eller et udtryk for 'forventet "
+        "afkast'.\n\nDatavindue: de seneste 126 handelsdages lukkekurser (del af den samme 1-års-historik "
+        "som volatiliteten beregnes ud fra) - ikke hele selskabets levetid.\n\n"
+        "Kilde: Yahoo Finance, daglige lukkekurser. Egen beregning: "
         "(seneste kurs / kursen 126 handelsdage tidligere - 1) × 100."
     ),
     "52u høj": "Højeste lukkekurs de seneste 52 uger.\n\nKilde: Yahoo Finance, 1 års daglige lukkekurser (maksimum af serien).",
@@ -342,42 +447,42 @@ COLUMN_HELP = {
 
 INDEX_CONFIGS = [
     {
-        "key": "c25", "flag": "🇩🇰", "short_name": "C25", "full_name": "OMX Copenhagen 25",
+        "key": "c25", "flag": "DK", "short_name": "C25", "full_name": "OMX Copenhagen 25",
         "index_ticker": "^OMXC25",
         "market": {"open": time(9, 0), "close": time(17, 0), "tz": "Europe/Copenhagen"},
-        "get_tickers": lambda: C25_TICKERS,
-        "get_sectors": lambda: C25_SECTORS,
+        "get_tickers": get_dk_tickers,
+        "get_sectors": get_dk_sectors,
     },
     {
-        "key": "sp500", "flag": "🇺🇸", "short_name": "S&P 500", "full_name": "S&P 500",
+        "key": "sp500", "flag": "US", "short_name": "S&P 500", "full_name": "S&P 500",
         "index_ticker": "^GSPC",
         "market": {"open": time(9, 30), "close": time(16, 0), "tz": "America/New_York"},
         "get_tickers": get_sp500_tickers,
         "get_sectors": get_sp500_sectors,
     },
     {
-        "key": "nasdaq100", "flag": "🇺🇸", "short_name": "Nasdaq 100", "full_name": "Nasdaq 100",
+        "key": "nasdaq100", "flag": "US", "short_name": "Nasdaq 100", "full_name": "Nasdaq 100",
         "index_ticker": "^NDX",
         "market": {"open": time(9, 30), "close": time(16, 0), "tz": "America/New_York"},
         "get_tickers": get_nasdaq100_tickers,
         "get_sectors": lambda: {},  # Slickcharts leverer ikke sektordata for Nasdaq 100
     },
     {
-        "key": "dowjones", "flag": "🇺🇸", "short_name": "Dow Jones", "full_name": "Dow Jones Industrial Average",
+        "key": "dowjones", "flag": "US", "short_name": "Dow Jones", "full_name": "Dow Jones Industrial Average",
         "index_ticker": "^DJI",
         "market": {"open": time(9, 30), "close": time(16, 0), "tz": "America/New_York"},
         "get_tickers": get_dowjones_tickers,
         "get_sectors": lambda: {},  # Slickcharts leverer ikke sektordata for Dow Jones
     },
     {
-        "key": "omxs30", "flag": "🇸🇪", "short_name": "OMXS30", "full_name": "OMX Stockholm 30",
+        "key": "omxs30", "flag": "SE", "short_name": "OMXS30", "full_name": "OMX Stockholm 30",
         "index_ticker": "^OMX",
         "market": {"open": time(9, 0), "close": time(17, 30), "tz": "Europe/Stockholm"},
         "get_tickers": get_omxs30_tickers,
         "get_sectors": get_omxs30_sectors,
     },
     {
-        "key": "dax", "flag": "🇩🇪", "short_name": "DAX 40", "full_name": "DAX 40",
+        "key": "dax", "flag": "DE", "short_name": "DAX 40", "full_name": "DAX 40",
         "index_ticker": "^GDAXI",
         "market": {"open": time(9, 0), "close": time(17, 30), "tz": "Europe/Berlin"},
         "get_tickers": get_dax_tickers,
@@ -639,9 +744,9 @@ def show_index_banner(config: dict):
 def build_tab_label(config: dict) -> str:
     overview = get_index_overview(config["index_ticker"])
     if overview is None:
-        return f"{config['flag']} {config['short_name']}"
-    arrow = "🟢" if overview["change_pct"] >= 0 else "🔴"
-    return f"{config['flag']} {config['short_name']}  {arrow} {overview['change_pct']:+.1f}%"
+        return f"{config['flag']} · {config['short_name']}"
+    arrow = "▲" if overview["change_pct"] >= 0 else "▼"
+    return f"{config['flag']} · {config['short_name']}  {arrow} {overview['change_pct']:+.1f}%"
 
 
 def show_index_ranking(configs: list):
@@ -662,7 +767,7 @@ def show_index_ranking(configs: list):
         rows_html += (
             '<div class="rank-row">'
             f'<span class="rank-num">{rank}</span>'
-            f'<span class="rank-name">{config["flag"]} {config["full_name"]}</span>'
+            f'<span class="rank-name">{config["flag"]} · {config["full_name"]}</span>'
             f'<span class="rank-change" style="color:{color}">{arrow} {change:+.2f}%</span>'
             "</div>"
         )
@@ -681,13 +786,13 @@ def show_market_status(market: dict):
 
     if status["open"]:
         st.success(
-            f"🟢 **Markedet er åbent**\n\n"
+            f"**Markedet er åbent**\n\n"
             f"Åbningstid: {hours_text}\n\n"
             f"Har været åbent i {format_timedelta(status['delta'])}"
         )
     else:
         st.error(
-            f"🔴 **Markedet er lukket**\n\n"
+            f"**Markedet er lukket**\n\n"
             f"Åbningstid: {hours_text}\n\n"
             f"Åbner om {format_timedelta(status['delta'])}"
         )
@@ -708,11 +813,11 @@ def show_best_worst(df: pd.DataFrame):
     st.markdown(
         f"""
         <div class="info-box green">
-            <b>🏆 Top 5 bedst i dag</b>
+            <b>Top 5 bedst i dag</b>
             {rows_html(best5, True)}
         </div>
         <div class="info-box red">
-            <b>📉 Top 5 dårligst i dag</b>
+            <b>Top 5 dårligst i dag</b>
             {rows_html(worst5, False)}
         </div>
         """,
@@ -721,7 +826,7 @@ def show_best_worst(df: pd.DataFrame):
 
 
 def show_news_section(live_df: pd.DataFrame):
-    st.markdown("**📰 Markedsnyheder**")
+    st.markdown("**Markedsnyheder**")
     st.caption("Kun overskrifter fra navngivne, verificerede medier (Reuters, Bloomberg m.fl.), højst 3 timer gamle.")
     top_movers = live_df.reindex(
         live_df["Ændring i dag (%)"].abs().sort_values(ascending=False).index
@@ -824,7 +929,7 @@ def generate_market_insights(full_df: pd.DataFrame, sector_map: dict) -> list:
     n_total = len(full_df)
     n_up = int((full_df["Ændring i dag (%)"] > 0).sum())
     n_down = int((full_df["Ændring i dag (%)"] < 0).sum())
-    lines.append(f"📊 {n_up} af {n_total} selskaber er i plus i dag, {n_down} er i minus.")
+    lines.append(f"<b>Bredde:</b> {n_up} af {n_total} selskaber er i plus i dag, {n_down} er i minus.")
 
     if sector_map:
         sector_df = full_df.copy()
@@ -840,25 +945,25 @@ def generate_market_insights(full_df: pd.DataFrame, sector_map: dict) -> list:
             if best_val > 0.5:
                 leader = sector_df[sector_df["Sektor"] == best_sector].sort_values("Ændring i dag (%)", ascending=False).iloc[0]
                 lines.append(
-                    f"🟢 {best_sector} er dagens bedste sektor (i snit {best_val:+.1f}%), trukket op af {leader['Selskab']} ({leader['Ændring i dag (%)']:+.1f}%)."
+                    f"<b>Bedste sektor:</b> {best_sector} (i snit {best_val:+.1f}%), trukket op af {leader['Selskab']} ({leader['Ændring i dag (%)']:+.1f}%)."
                 )
             if worst_val < -0.5:
                 laggard = sector_df[sector_df["Sektor"] == worst_sector].sort_values("Ændring i dag (%)").iloc[0]
                 lines.append(
-                    f"🔴 {worst_sector} halter i dag (i snit {worst_val:+.1f}%), tynget af {laggard['Selskab']} ({laggard['Ændring i dag (%)']:+.1f}%)."
+                    f"<b>Svageste sektor:</b> {worst_sector} (i snit {worst_val:+.1f}%), tynget af {laggard['Selskab']} ({laggard['Ændring i dag (%)']:+.1f}%)."
                 )
 
     top_mover = full_df.loc[full_df["Ændring i dag (%)"].abs().idxmax()]
-    lines.append(f"⚡ Dagens største enkeltbevægelse: {top_mover['Selskab']} ({top_mover['Ændring i dag (%)']:+.1f}%).")
+    lines.append(f"<b>Største bevægelse:</b> {top_mover['Selskab']} ({top_mover['Ændring i dag (%)']:+.1f}%).")
 
     if "Volatilitet (år, %)" in full_df.columns:
         high_vol = full_df.loc[full_df["Volatilitet (år, %)"].idxmax()]
-        lines.append(f"📈 {high_vol['Selskab']} har den højeste historiske volatilitet i dag ({high_vol['Volatilitet (år, %)']:.0f}%).")
+        lines.append(f"<b>Højeste volatilitet:</b> {high_vol['Selskab']} ({high_vol['Volatilitet (år, %)']:.0f}%).")
 
     avg_change = full_df["Ændring i dag (%)"].mean()
     if abs(avg_change) > 1.0:
         retning = "op" if avg_change > 0 else "ned"
-        lines.append(f"↕️ Bredden i markedet trækker samlet {retning} i dag, med et simpelt gennemsnit på {avg_change:+.1f}% på tværs af alle selskaber.")
+        lines.append(f"<b>Markedsretning:</b> samlet {retning} i dag, med et simpelt gennemsnit på {avg_change:+.1f}% på tværs af alle selskaber.")
 
     return lines[:6]
 
@@ -867,7 +972,7 @@ def show_market_insights(full_df: pd.DataFrame, sector_map: dict):
     lines = generate_market_insights(full_df, sector_map)
     lines_html = "".join(f'<div class="insight-line">{line}</div>' for line in lines)
     st.markdown(
-        f'<div class="insight-box"><div class="insight-title">🔍 Værd at bemærke i dag</div>{lines_html}</div>',
+        f'<div class="insight-box"><div class="insight-title">Værd at bemærke i dag</div>{lines_html}</div>',
         unsafe_allow_html=True,
     )
     st.caption("Automatisk genereret ud fra dagens reelle tal (markedsbredde, sektor-gennemsnit og største bevægelser) - ikke en analytikervurdering.")
@@ -940,7 +1045,7 @@ def show_dashboard(config: dict):
         valgt_ticker = tickers[valgt_navn]
         with info_col:
             st.write("")
-            with st.popover("ℹ️", help=f"Hvad laver {valgt_navn}?"):
+            with st.popover("Info", help=f"Hvad laver {valgt_navn}?"):
                 st.markdown(f"**{valgt_navn}** ({valgt_ticker})")
                 description = get_company_description(valgt_ticker)
                 st.write(description if description else "Ingen virksomhedsbeskrivelse tilgængelig lige nu.")
@@ -969,14 +1074,19 @@ def show_dashboard(config: dict):
 # ---------------------------------------------------------------------------
 
 TOTAL_AUM_DKK = 25_000_000  # midtpunkt af 20-30 mio. kr., som angivet
-PORTFOLIO_SIZE = 8  # selskaber per portefølje - et almindeligt niveau for koncentreret,
-# men stadig diversificeret forvaltning (klassisk porteføljeteori viser at langt
-# hovedparten af den selskabsspecifikke risiko er væk efter 8-20 aktier)
+PORTFOLIO_SIZE = 25  # selskaber per portefølje. Moderne porteføljeteori (Markowitz, 1952 samt
+# senere empiri, bl.a. Statman 1987) viser at den selskabsspecifikke ("idiosynkratiske") risiko
+# stort set er bortdiversificeret efter 20-30 tilfældigt spredte aktier - derfra kommer
+# porteføljens resterende udsving næsten udelukkende fra markedet som helhed ("systematisk"
+# risiko, som ikke kan diversificeres væk). 25 er derfor valgt som et niveau, hvor
+# diversifikationsgevinsten for alvor er indhøstet, uden at gøre porteføljerne urealistisk store
+# til illustrationsformål.
 
 # Hvilken valuta hvert indeks' selskaber handles i - bruges til at regne udenlandske aktier
 # om til kr. med periodens faktiske valutakurser, så en samlet porteføljeværdi giver mening.
 INDEX_CURRENCY = {
-    "C25": "DKK", "S&P 500": "USD", "Nasdaq 100": "USD", "OMXS30": "SEK", "DAX 40": "EUR",
+    "C25": "DKK", "S&P 500": "USD", "Nasdaq 100": "USD", "Dow Jones": "USD",
+    "OMXS30": "SEK", "DAX 40": "EUR",
 }
 FX_TICKERS = {"USD": "USDDKK=X", "SEK": "SEKDKK=X", "EUR": "EURDKK=X"}
 PORTFOLIO_PERIOD_OPTIONS = {"1 måned": "1mo", "6 måneder": "6mo", "1 år": "1y"}
@@ -1183,11 +1293,18 @@ def show_portfolio_positions_live(all_holdings: dict, per_position: float):
             display_rows = []
             for _, row in holdings.iterrows():
                 currency = INDEX_CURRENCY.get(row["Kilde"], "DKK")
+                last_daily_dkk = float(row["_prices"].iloc[-1])  # seneste kendte dagslukkekurs (DKK)
                 live_local = live_prices.get(row["Ticker"])
+                price_dkk_now = last_daily_dkk
                 if pd.notna(live_local) and (currency == "DKK" or fx_now.get(currency)):
-                    price_dkk_now = float(live_local) * (1.0 if currency == "DKK" else float(fx_now[currency]))
-                else:
-                    price_dkk_now = float(row["_prices"].iloc[-1])  # fallback: seneste dagslukkekurs
+                    live_dkk = float(live_local) * (1.0 if currency == "DKK" else float(fx_now[currency]))
+                    # Sundhedstjek: Yahoo Finances bulk-download af minutkurser fejlfordeler i sjældne
+                    # tilfælde en pris til den forkerte ticker, når mange forskellige aktier hentes samlet -
+                    # det gav i en testkørsel enkelte positioner med kunstige 200-500% "afkast" på én måned.
+                    # Afviger live-kursen med mere end 40% fra seneste reelle dagslukkekurs, er det med stor
+                    # sandsynlighed en fejlmålt kurs, ikke en reel intradag-bevægelse - så bruges dagslukkekursen.
+                    if last_daily_dkk > 0 and 0.6 <= live_dkk / last_daily_dkk <= 1.4:
+                        price_dkk_now = live_dkk
                 value_now = row["Antal"] * price_dkk_now + row["Kontantrest"]
                 invested = row["Antal"] * row["Købskurs_DKK"] + row["Kontantrest"]
                 display_rows.append({
@@ -1230,10 +1347,36 @@ def show_portfolio_positions_live(all_holdings: dict, per_position: float):
 def show_portfolios():
     section_header(
         "PORTEFØLJER · SYSTEMATISK VS. IDIOSYNKRATISK RISIKO",
-        "Tre modelporteføljer på 25 mio. kr.",
+        "Tre modelporteføljer på 25 mio. kr. med 25 selskaber hver",
         "Illustrativt og pædagogisk - ikke personlig rådgivning. Selskaberne er valgt objektivt ud "
-        "fra deres målte korrelation med S&P 500 over det seneste år, på tværs af alle 6 indeks.",
+        "fra deres målte korrelation med S&P 500 over det seneste år, på tværs af alle 6 indeks "
+        "(samme selskab kan indgå i flere porteføljer, hvis det reelt hører hjemme der).",
     )
+
+    with st.expander("Læs først: hvad er systematisk og idiosynkratisk risiko?"):
+        st.markdown(
+            "En akties samlede kursudsving (volatilitet) kan opdeles i to slags risiko, jf. moderne "
+            "porteføljeteori (Markowitz, 1952):\n\n"
+            "- **Systematisk risiko** ('markedsrisiko'): den del af udsvingene der følger hele markedet/"
+            "konjunkturen - renter, vækst, krige, pandemier. Rammer stort set alle aktier samtidig og kan "
+            "IKKE fjernes ved at sprede sig over flere aktier.\n"
+            "- **Idiosynkratisk risiko** ('selskabsspecifik risiko'): den del der er unik for det enkelte "
+            "selskab - en produktfejl, et ledelsesskifte, en retssag. Rammer typisk kun ét selskab og KAN "
+            "diversificeres væk ved at eje mange, forskelligartede aktier.\n\n"
+            "Vi bruger korrelation med S&P 500 (det brede amerikanske marked, som proxy for den globale "
+            "konjunktur) som mål for, hvor systematisk en akties bevægelser er: høj korrelation = "
+            "bevægelserne er mest markedsdrevne (systematisk), lav korrelation (uanset fortegn) = "
+            "bevægelserne er mest selskabsspecifikke (idiosynkratisk).\n\n"
+            "**Hvorfor er 'Blanding' teoretisk den bedste af de tre?** Den rendyrkede systematiske "
+            "portefølje giver ingen diversifikationsgevinst - den svinger næsten som markedet selv. Den "
+            "rendyrkede idiosynkratiske portefølje har lav samvariation med markedet, men bærer typisk "
+            "større selskabsspecifik risiko pr. aktie. Ved at blande de to typer opnår man ifølge "
+            "porteføljeteorien den bedste kombination: markedseksponeringen giver forventet langsigtet "
+            "afkast (man bliver betalt for at bære systematisk risiko), mens spredningen på tværs af "
+            "lavt-korrelerede selskaber reducerer den samlede volatilitet uden at ofre ret meget "
+            "forventet afkast - dvs. et bedre forhold mellem risiko og afkast (højere Sharpe-ratio), ikke "
+            "nødvendigvis det højeste rå afkast."
+        )
 
     universe_df = build_correlation_universe()
     if universe_df.empty or len(universe_df) < PORTFOLIO_SIZE * 3:
@@ -1243,16 +1386,30 @@ def show_portfolios():
     systematic, idiosyncratic, blend = build_portfolios(universe_df, PORTFOLIO_SIZE)
     portfolio_defs = [
         ("1) S – Systematiske selskaber", systematic,
-         "Høj samvariation med det brede marked - følger konjunkturerne."),
+         "Høj korrelation med det brede marked - svinger stort set i takt med konjunkturerne, "
+         "lille diversifikationsgevinst."),
         ("2) I – Idiosynkratiske selskaber", idiosyncratic,
-         "Lav samvariation - kursen styres mest af selskabsspecifikke forhold."),
-        ("3) Blanding", blend,
-         "Moderat samvariation - midt imellem de to andre."),
+         "Lav korrelation med markedet - kursen styres mest af selskabsspecifikke forhold, ikke "
+         "konjunkturen."),
+        ("3) Blanding (teoretisk bedst risikojusteret)", blend,
+         "Korrelation tættest på midten af hele universet - den kombination porteføljeteorien peger på "
+         "som bedst afvejet mellem markedsafkast og diversifikation."),
     ]
     per_position = TOTAL_AUM_DKK / 3 / PORTFOLIO_SIZE
 
-    period_label = st.selectbox("Investeringshorisont:", list(PORTFOLIO_PERIOD_OPTIONS.keys()), index=0, key="portfolio_period")
+    period_label = st.selectbox(
+        "Investeringshorisont - vælg hvor langt tilbage 'købsdagen' skal ligge:",
+        list(PORTFOLIO_PERIOD_OPTIONS.keys()), index=0, key="portfolio_period",
+        help="Denne vælger ÆNDRER selve købsdagen: vælger du '6 måneder', regner alle tre porteføljer "
+             "på at aktierne blev købt for ca. 6 måneder siden i stedet for 1 måned - ikke en 6 måneders "
+             "prognose. Den nye købsdato og det fulde regnestykke står lige nedenfor.",
+    )
     period = PORTFOLIO_PERIOD_OPTIONS[period_label]
+    st.caption(
+        f"Valgt horisont: **{period_label}** → porteføljerne regnes, som om de blev købt for "
+        f"{period_label.lower()} siden, til datidens faktiske lukkekurser. Skift horisont for at flytte "
+        f"købsdagen - se den præcise dato i boksen nedenfor."
+    )
 
     # Byg beholdningerne (købsdag, antal hele aktier, kontantrest, prisserier)
     all_holdings = {}
@@ -1271,8 +1428,8 @@ def show_portfolios():
     aum_txt = f"{TOTAL_AUM_DKK:,.0f}".replace(",", ".")
     pos_txt = f"{per_position:,.0f}".replace(",", ".")
     st.markdown(
-        f'''<div class="insight-box"><div class="insight-title">📌 Sådan er regnestykket sat op</div>
-        <div class="insight-line"><b>Købsdag: {inception:%d.%m.%Y}</b> (første handelsdag i den valgte horisont - vælger du en anden horisont, flytter købsdagen sig tilsvarende).</div>
+        f'''<div class="insight-box"><div class="insight-title">Sådan er regnestykket sat op</div>
+        <div class="insight-line"><b>Købsdag: {inception:%d.%m.%Y}</b> - dette ER den dato horisontvælgeren ovenfor bestemmer (første handelsdag {period_label.lower()} tilbage fra i dag). Vælg en anden horisont for at flytte denne dato.</div>
         <div class="insight-line">På købsdagen deles {aum_txt} kr. ligeligt: ~{pos_txt} kr. pr. selskab. Der købes <b>hele aktier</b> til dagens faktiske lukkekurs (omregnet til DKK med dagens valutakurs) - resten står som kontanter uden forrentning.</div>
         <div class="insight-line">Alt afkast måles fra denne dag. Antal aktier ligger fast; kun kurserne (og valutakurserne) bevæger sig - præcis som i et rigtigt depot uden handler undervejs.</div>
         <div class="insight-line">Kilder: kurser og valutakurser fra Yahoo Finance; korrelationer beregnet på 1 års daglige afkast mod S&P 500 (egen beregning).</div>
@@ -1550,7 +1707,7 @@ def show_housing_market():
         "med metode og kilde ved hvert tal (hold musen over ?-ikonerne).",
     )
 
-    with st.expander("📋 Metode og datakilder - læs hvordan hvert tal er beregnet"):
+    with st.expander("Metode og datakilder - læs hvordan hvert tal er beregnet"):
         st.markdown(
             """
 **Prisindeks (EJ99 / EJ5, Danmarks Statistik).** DST's boligprisindeks er *kvalitetskorrigerede*:
@@ -1680,7 +1837,7 @@ Statstidende, månedlig og kun ca. en måned forsinket.
                 "Max drawdown": st.column_config.NumberColumn(help="Største fald fra top til bund i hele serien 1992-i dag (nominelt). Egen beregning på kædet DST-indeks."),
             },
         )
-    with st.expander("🎓 Lær: CAGR, realafkast og drawdown - de tre tal en formueforvalter kigger på først"):
+    with st.expander("Lær: CAGR, realafkast og drawdown - de tre tal en formueforvalter kigger på først"):
         st.markdown(
             """
 - **CAGR** glatter udsving ud og gør vidt forskellige perioder sammenlignelige. En bolig der er
@@ -1720,7 +1877,7 @@ Statstidende, månedlig og kun ca. en måned forsinket.
             "(egen beregning). Vigtige forbehold: S&P 500 er i USD (valutaeffekt ikke medregnet), uden udbytter; "
             "boligindekset er uden lejeværdi/omkostninger. Sammenligningen viser kun ren prisudvikling."
         )
-        with st.expander("🎓 Lær: hvorfor sammenligningen halter - og alligevel er nyttig"):
+        with st.expander("Lær: hvorfor sammenligningen halter - og alligevel er nyttig"):
             st.markdown(
                 """
 - **Totalafkast mangler på begge sider.** Aktier udbetaler udbytte (~2% årligt for S&P 500), og
@@ -1881,7 +2038,7 @@ Statstidende, månedlig og kun ca. en måned forsinket.
                 f"Aktuelt niveau er {latest_val / hist_avg * 100:.0f}% af historisk snit",
                 help="Kilde: DST TVANG1, hele seriens historik. Egen beregning: simpelt gennemsnit af alle måneder samt seneste måned som andel heraf.",
             )
-            with st.expander("🎓 Lær: hvorfor PE-fonde elsker denne graf"):
+            with st.expander("Lær: hvorfor PE-fonde elsker denne graf"):
                 st.markdown(
                     """
 Tvangsauktioner er en *omvendt* indikator: lave tal betyder, at ejerne kan betale deres lån -
@@ -2039,6 +2196,74 @@ def get_rate_news(max_age_hours: float = 1.0) -> list:
     return articles[:5]
 
 
+def _fed_bucket_sort_key(label: str) -> int:
+    """Sorterer Polymarkeds udfaldsgrupper fra størst rentenedsættelse til størst forhøjelse
+    (fx '50+ bps decrease' -> -50, 'No change' -> 0, '25 bps increase' -> 25), så søjlerne i
+    forecast-grafen altid vises i en logisk, stigende rækkefølge uanset hvilken rækkefølge
+    Polymarkets API selv returnerer dem i."""
+    lower = label.lower()
+    if "no change" in lower:
+        return 0
+    match = re.search(r"(\d+)", lower)
+    magnitude = int(match.group(1)) if match else 0
+    return -magnitude if "decrease" in lower else magnitude
+
+
+@st.cache_data(ttl=300)
+def get_fed_decision_forecast() -> list:
+    """Markedsimplicerede sandsynligheder for Feds kommende rentebeslutninger, hentet fra
+    Polymarket - et forudsigelsesmarked hvor folk handler for rigtige penge på det faktiske udfald,
+    så prisen (0-1) på hver kontrakt direkte afspejler markedets egen vurdering af sandsynligheden.
+
+    Dette er den samme grundtanke som CME FedWatch (som er branchestandarden for at "forecaste"
+    Fed-beslutninger, bygget på Fed funds-futurespriser) - men CME FedWatch har ingen gratis,
+    offentlig API (afprøvet: CME's eget endpoint og Nasdaq Data Links CME-spejling blokerer begge
+    med 403). Polymarkets gamma-api.polymarket.com er til gengæld gratis, kræver ingen nøgle og
+    virker direkte (afprøvet). Der findes ét marked pr. kommende FOMC-møde ("Fed Decision in
+    <måned>?"), opdelt i gensidigt udelukkende udfaldsgrupper (fx "25 bps increase") - hver
+    gruppes 'Yes'-pris er markedets implicerede sandsynlighed for netop det udfald."""
+    try:
+        response = requests.get(
+            "https://gamma-api.polymarket.com/public-search",
+            params={"q": "fed decision", "events_status": "active"},
+            headers=WIKI_HEADERS, timeout=15,
+        )
+        response.raise_for_status()
+        events = response.json().get("events", [])
+
+        meetings = []
+        for event in events:
+            title = event.get("title", "")
+            if not re.match(r"^Fed Decision in \w+\??$", title, re.IGNORECASE):
+                continue
+            if event.get("closed") or not event.get("active", True):
+                continue
+            outcomes = []
+            for market in event.get("markets", []):
+                label = market.get("groupItemTitle")
+                prices = market.get("outcomePrices")
+                if not label or not prices:
+                    continue
+                if isinstance(prices, str):
+                    prices = json.loads(prices)
+                try:
+                    yes_prob = float(prices[0])
+                except (ValueError, IndexError, TypeError):
+                    continue
+                outcomes.append({"label": label, "prob": yes_prob})
+            if not outcomes or not event.get("endDate"):
+                continue
+            outcomes.sort(key=lambda o: _fed_bucket_sort_key(o["label"]))
+            meetings.append({
+                "title": title, "end_date": event["endDate"],
+                "volume": event.get("volume"), "outcomes": outcomes,
+            })
+        meetings.sort(key=lambda m: m["end_date"])
+        return meetings[:4]
+    except Exception:
+        return []
+
+
 NB_INSTRUMENT_LABELS = {
     "Nationalbankens rente - Folioindskud (Aug 1987- )": "Foliorente",
     "Nationalbankens rente - Indskudsbeviser (Apr. 1992-)": "Indskudsbevisrente",
@@ -2071,7 +2296,7 @@ def show_central_banks():
         if not folio.empty:
             nb_folio = float(folio["Rente"].iloc[-1])
             c1.metric(
-                "🇩🇰 Nationalbanken (folio)", f"{nb_folio:.2f}%",
+                "Nationalbanken (folio)", f"{nb_folio:.2f}%",
                 f"pr. {folio['Dato'].iloc[-1]:%d.%m.%Y}",
                 help="Foliorenten - Nationalbankens toneangivende sats (forrentning af bankernes indeståender).\n\nKilde: Danmarks Nationalbank via Danmarks Statistik, tabel DNRENTD (dagsobservationer). Rå officiel sats - ingen egen beregning.",
             )
@@ -2081,7 +2306,7 @@ def show_central_banks():
         if not dfr.empty:
             ecb_dfr = float(dfr["Rente"].iloc[-1])
             c2.metric(
-                "🇪🇺 ECB (indlån/DFR)", f"{ecb_dfr:.2f}%",
+                "ECB (indlån/DFR)", f"{ecb_dfr:.2f}%",
                 f"siden {dfr['Dato'].iloc[-1]:%d.%m.%Y}",
                 help="ECB's indlånsrente (deposit facility rate) - den toneangivende euro-sats i dag.\n\nKilde: ECB Data Portal (data-api.ecb.europa.eu), serie FM.B.U2.EUR.4F.KR.DFR.LEV. Rå officiel sats.",
             )
@@ -2089,13 +2314,13 @@ def show_central_banks():
         fed_last = fed.iloc[-1]
         target = f"{fed_last['MålFra']:.2f}-{fed_last['MålTil']:.2f}%" if pd.notna(fed_last.get("MålFra")) else "–"
         c3.metric(
-            "🇺🇸 Fed (EFFR)", f"{fed_last['Rente']:.2f}%",
+            "Fed (EFFR)", f"{fed_last['Rente']:.2f}%",
             f"målbånd {target}",
             help="Effective Federal Funds Rate - den faktiske dag-til-dag-rente i USA, styret af Feds målbånd.\n\nKilde: Federal Reserve Bank of New Yorks åbne API (markets.newyorkfed.org). Rå officiel sats.",
         )
     if not riks.empty:
         c4.metric(
-            "🇸🇪 Riksbanken (styringsrente)", f"{float(riks['Rente'].iloc[-1]):.2f}%",
+            "Riksbanken (styringsrente)", f"{float(riks['Rente'].iloc[-1]):.2f}%",
             f"pr. {riks['Dato'].iloc[-1]:%d.%m.%Y}",
             help="Riksbankens styringsrente.\n\nKilde: Sveriges Riksbanks åbne SWEA-API (api.riksbank.se), serie SECBREPOEFF. Rå officiel sats.",
         )
@@ -2110,7 +2335,7 @@ def show_central_banks():
         )
         if inflation is not None:
             m2.metric(
-                "🇩🇰 Inflation (å/å)", f"{inflation:.1f}%",
+                "Inflation (å/å)", f"{inflation:.1f}%",
                 f"seneste: {inflation_month}",
                 help="Årsstigning i forbrugerprisindekset.\n\nKilde: Danmarks Statistik PRIS01, DST's eget beregnede år-til-år-tal. ECB's (og dermed reelt Danmarks) mål er 2%.",
             )
@@ -2118,7 +2343,7 @@ def show_central_banks():
                 "Realrente (folio - inflation)", f"{(nb_folio - inflation):+.1f}%",
                 help="Foliorenten minus inflationen - den reale forrentning af 'sikre' penge.\n\nKilder: DST DNRENTD og PRIS01. Egen beregning: simpel differens (Fisher-tilnærmelse). Negativ realrente = kontanter taber købekraft.",
             )
-        with st.expander("🎓 Lær: fastkurspolitikken - hvorfor Nationalbanken 'bare følger' ECB"):
+        with st.expander("Lær: fastkurspolitikken - hvorfor Nationalbanken 'bare følger' ECB"):
             st.markdown(
                 """
 Danmark har siden 1982 ført **fastkurspolitik**: kronen holdes stabil over for euroen
@@ -2131,27 +2356,77 @@ danske renter, så kig på Frankfurt, ikke København.**
                 """
             )
 
+    # ---- Forecast: markedets forventning til Feds næste rentebeslutninger -----
+    section_header(
+        "2 · FORVENTNING", "Markedets bud på Feds næste rentebeslutninger",
+        "Ikke en prognose fra os - sandsynligheder afledt direkte af priserne på Polymarket, et "
+        "forudsigelsesmarked hvor folk handler for rigtige penge på det faktiske udfald.",
+    )
+    fed_forecast = get_fed_decision_forecast()
+    if fed_forecast:
+        st.caption(
+            "Samme grundidé som CME FedWatch - branchestandarden for at følge markedets forventning "
+            "til Fed, normalt baseret på Fed funds-futures. CME FedWatch har dog ingen gratis, åben "
+            "API, så tallene her kommer i stedet fra Polymarket: hver udfaldsmulighed (fx '25 bps "
+            "forhøjelse') er sin egen kontrakt, og kontraktens pris (0-100%) ER markedets prisfastsatte "
+            "sandsynlighed for netop det udfald - jo flere penge der handles for, jo mere information "
+            "er presset ind i prisen. Tallene ændrer sig løbende med nye data og udtalelser og er "
+            "IKKE en garanti for udfaldet."
+        )
+        meeting_tabs = st.tabs([m["title"].replace("Fed Decision in", "").strip(" ?") for m in fed_forecast])
+        for tab, meeting in zip(meeting_tabs, fed_forecast):
+            with tab:
+                labels = [o["label"] for o in meeting["outcomes"]]
+                probs = [o["prob"] * 100 for o in meeting["outcomes"]]
+                bar_colors = [
+                    "#b91c1c" if "decrease" in l.lower() else "#047857" if "increase" in l.lower() else "#6b7280"
+                    for l in labels
+                ]
+                fig_fed = go.Figure(go.Bar(
+                    x=labels, y=probs, marker_color=bar_colors,
+                    text=[f"{p:.1f}%" for p in probs], textposition="outside",
+                ))
+                fig_fed.update_layout(
+                    margin=dict(l=10, r=10, t=10, b=10), height=280,
+                    yaxis=dict(title="Markedsimpliceret sandsynlighed (%)", showgrid=True,
+                               gridcolor="rgba(128,128,128,0.15)", range=[0, max(probs) * 1.25 if probs else 100]),
+                    xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                )
+                st.plotly_chart(fig_fed, width="stretch")
+                end_date_txt = pd.to_datetime(meeting["end_date"]).strftime("%d.%m.%Y")
+                volume_txt = f"${meeting['volume']:,.0f}".replace(",", ".") if meeting.get("volume") else "–"
+                st.caption(f"Møde afgøres senest {end_date_txt} · samlet handlet volumen på markedet hidtil: {volume_txt}")
+        source_note(
+            "Kilde: Polymarket (gamma-api.polymarket.com) - offentligt og gratis, ingen nøgle krævet. "
+            "Egen udtræk: 'Yes'-prisen på hvert af Polymarkets bracket-markeder for FOMC-mødet, "
+            "omregnet fra decimal (0-1) til procent. Dette er markedsdrevne forventninger fra en "
+            "tredjepartsplatform - IKKE Nationalbankens, ECB's eller Feds egne prognoser, og ikke "
+            "investeringsrådgivning."
+        )
+    else:
+        st.info("Kunne ikke hente markedets forventninger til Feds rentebeslutninger lige nu. Prøv igen om lidt.")
+
     # ---- Historik: 20 års styringsrenter --------------------------------------
-    section_header("2 · HISTORIK", "20 års pengepolitik i én graf",
+    section_header("3 · HISTORIK", "20 års pengepolitik i én graf",
                    "Nulrente-årtiet, inflationschokket i 2022 og normaliseringen - fire centralbanker side om side.")
     fig = go.Figure()
     cutoff = pd.Timestamp.now() - pd.Timedelta(days=365 * 20)
     if not nb_hist.empty:
         folio_hist = nb_hist[nb_hist["Dato"] >= cutoff].sort_values("Dato")
         fig.add_trace(go.Scatter(x=folio_hist["Dato"], y=folio_hist["Rente"], mode="lines",
-                                 name="🇩🇰 Nationalbanken (folio, måned)", line=dict(color="#b91c1c", width=2, shape="hv")))
+                                 name="Nationalbanken (folio, måned)", line=dict(color="#b91c1c", width=2, shape="hv")))
     if not ecb.empty:
         dfr_hist = ecb[ecb["Instrument"].str.contains("DFR", na=False)].sort_values("Dato")
         full_dates = pd.date_range(max(dfr_hist["Dato"].min(), cutoff), pd.Timestamp.now(), freq="D")
         dfr_daily = dfr_hist.set_index("Dato")["Rente"].reindex(full_dates, method="ffill")
         fig.add_trace(go.Scatter(x=dfr_daily.index, y=dfr_daily.values, mode="lines",
-                                 name="🇪🇺 ECB (DFR)", line=dict(color="#1d4ed8", width=2, shape="hv")))
+                                 name="ECB (DFR)", line=dict(color="#1d4ed8", width=2, shape="hv")))
     if not fed.empty:
         fig.add_trace(go.Scatter(x=fed["Dato"], y=fed["Rente"], mode="lines",
-                                 name="🇺🇸 Fed (EFFR, seneste år)", line=dict(color="#047857", width=2, shape="hv")))
+                                 name="Fed (EFFR, seneste år)", line=dict(color="#047857", width=2, shape="hv")))
     if not riks.empty:
         fig.add_trace(go.Scatter(x=riks["Dato"], y=riks["Rente"], mode="lines",
-                                 name="🇸🇪 Riksbanken", line=dict(color="#b45309", width=2, shape="hv")))
+                                 name="Riksbanken", line=dict(color="#b45309", width=2, shape="hv")))
     fig.add_hline(y=0, line_dash="dot", line_color="rgba(128,128,128,0.6)")
     fig.update_layout(
         margin=dict(l=10, r=10, t=10, b=10), height=430,
@@ -2170,7 +2445,7 @@ danske renter, så kig på Frankfurt, ikke København.**
     # ---- Transmission: fra styringsrente til din bankkonto --------------------
     trans = get_bank_transmission()
     if not trans.empty:
-        section_header("3 · TRANSMISSION", "Fra styringsrente til din privatøkonomi",
+        section_header("4 · TRANSMISSION", "Fra styringsrente til din privatøkonomi",
                        "Pengepolitikkens virkning på det, folk faktisk betaler og får i banken.")
         fig2 = go.Figure()
         combos = [
@@ -2194,7 +2469,7 @@ danske renter, så kig på Frankfurt, ikke København.**
             "ingen egen beregning. Bemærk forsinkelsen og spændet i forhold til styringsrenten ovenfor: "
             "det er bankernes marginal."
         )
-        with st.expander("🎓 Lær: hvorfor renten er det vigtigste tal i wealth management"):
+        with st.expander("Lær: hvorfor renten er det vigtigste tal i wealth management"):
             st.markdown(
                 """
 - **Diskontering:** Alle aktiver - aktier, boliger, obligationer - er fremtidige pengestrømme
@@ -2211,7 +2486,7 @@ danske renter, så kig på Frankfurt, ikke København.**
             )
 
     # ---- Nyheder om renter (maks. 1 time gamle) --------------------------------
-    section_header("4 · NYHEDER", "Rente-nyheder lige nu",
+    section_header("5 · NYHEDER", "Rente-nyheder lige nu",
                    "Kun overskrifter fra navngivne medier, højst 1 time gamle, filtreret for pengepolitik.")
     rate_news = get_rate_news(max_age_hours=1.0)
     if rate_news:
@@ -2391,7 +2666,7 @@ def show_business_cycle():
     section_header("1 · TEMPERATUR", "Økonomien lige nu", "")
     col_dk, col_us = st.columns(2)
     with col_dk:
-        st.markdown("**🇩🇰 Danmark**")
+        st.markdown("**Danmark**")
         m1, m2 = st.columns(2)
         if not dk_gdp.empty:
             m1.metric(
@@ -2419,7 +2694,7 @@ def show_business_cycle():
                 help="Forbrugertillidsindikatoren (nettotal): andelen af optimister minus andelen af pessimister i DST's månedlige spørgeundersøgelse. 0 = neutral, negativt = flere pessimister end optimister.\n\nKilde: Danmarks Statistik FORV1. Rå officielt tal.",
             )
     with col_us:
-        st.markdown("**🇺🇸 USA**")
+        st.markdown("**USA**")
         m1, m2 = st.columns(2)
         if not us_gdp.empty:
             m1.metric(
@@ -2451,7 +2726,7 @@ def show_business_cycle():
                 help="10-årig amerikansk statsrente minus 3-måneders. Negativt spænd (inverteret kurve) har varslet stort set alle amerikanske recessioner siden 1960'erne.\n\nKilde: Yahoo Finance, ^TNX og ^IRX (begge i procent). Egen beregning: simpel differens, i procentPOINT.",
             )
 
-    with st.expander("🎓 Lær: konjunkturcyklussen - og hvor i den vi er"):
+    with st.expander("Lær: konjunkturcyklussen - og hvor i den vi er"):
         st.markdown(
             """
 Økonomien bevæger sig i bølger: **opsving → højkonjunktur → afmatning → lavkonjunktur** (og i
@@ -2480,9 +2755,9 @@ ledigheden stiger. Derfor står rekkefølgen på denne side som den gør.
         us_plot = us_plot[us_plot["Kvartal"] >= cutoff_q]
         fig = go.Figure()
         fig.add_trace(go.Bar(x=[quarter_to_date(q) for q in dk_plot["Kvartal"]], y=dk_plot["Vækst"],
-                             name="🇩🇰 Danmark (k/k)", marker_color="rgba(185,28,28,0.7)"))
+                             name="Danmark (k/k)", marker_color="rgba(185,28,28,0.7)"))
         fig.add_trace(go.Scatter(x=[quarter_to_date(q) for q in us_plot["Kvartal"]], y=us_plot["Vækst_kk"],
-                                 mode="lines", name="🇺🇸 USA (k/k, omregnet)", line=dict(color="#1d4ed8", width=2.5)))
+                                 mode="lines", name="USA (k/k, omregnet)", line=dict(color="#1d4ed8", width=2.5)))
         fig.add_hline(y=0, line_dash="dot", line_color="rgba(128,128,128,0.6)")
         fig.update_layout(
             margin=dict(l=10, r=10, t=10, b=10), height=380,
@@ -2503,11 +2778,11 @@ ledigheden stiger. Derfor står rekkefølgen på denne side som den gør.
     if not dk_unemp.empty:
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(x=dk_unemp["Dato"], y=dk_unemp["Ledighed"], mode="lines",
-                                  name="🇩🇰 Danmark (brutto)", line=dict(color="#b91c1c", width=2.5)))
+                                  name="Danmark (brutto)", line=dict(color="#b91c1c", width=2.5)))
         u = us_bls.get("LNS14000000")
         if u is not None and not u.empty:
             fig2.add_trace(go.Scatter(x=u["Dato"], y=u["Værdi"], mode="lines",
-                                      name="🇺🇸 USA (U-3)", line=dict(color="#1d4ed8", width=2.5)))
+                                      name="USA (U-3)", line=dict(color="#1d4ed8", width=2.5)))
         fig2.update_layout(
             margin=dict(l=10, r=10, t=10, b=10), height=360,
             yaxis=dict(title="Pct. af arbejdsstyrken", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
@@ -2560,7 +2835,7 @@ ledigheden stiger. Derfor står rekkefølgen på denne side som den gør.
             "Kilde: Yahoo Finance, ugentlige observationer af ^TNX (10-årig) og ^IRX (3-måneders), begge "
             "noteret i procent. Egen beregning: simpel differens. 15 års historik."
         )
-        with st.expander("🎓 Lær: hvorfor en inverteret rentekurve varsler recession"):
+        with st.expander("Lær: hvorfor en inverteret rentekurve varsler recession"):
             st.markdown(
                 """
 Normalt kræver investorer højere rente for at binde penge i 10 år end i 3 måneder (usikkerheden
@@ -2585,7 +2860,7 @@ varslet holder?
 
 show_index_ranking(INDEX_CONFIGS)
 
-tab_labels = [build_tab_label(config) for config in INDEX_CONFIGS] + ["💼 Porteføljer", "🏠 Boligmarked", "🏦 Centralbanker", "🔄 Konjunkturer"]
+tab_labels = [build_tab_label(config) for config in INDEX_CONFIGS] + ["Porteføljer", "Boligmarked", "Centralbanker", "Konjunkturer"]
 tabs = st.tabs(tab_labels)
 
 for tab, config in zip(tabs[:-4], INDEX_CONFIGS):
