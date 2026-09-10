@@ -22,46 +22,95 @@ st_autorefresh(interval=300_000, key="refresh")  # opdaterer hvert 5. minut. Med
 st.markdown(
     """
     <style>
+    /* ---- Professionelt designsystem: dæmpet palette, kort med tynde rammer, ensartet typografi ---- */
+    :root {
+        --pos: #15803d; --neg: #b91c1c;
+        --border: rgba(128,128,128,0.22);
+        --surface: rgba(128,128,128,0.055);
+    }
+    /* Nøgletalskort (st.metric) som afgrænsede kort */
+    div[data-testid="stMetric"] {
+        border: 1px solid var(--border); border-radius: 10px;
+        padding: 12px 16px; background: var(--surface);
+    }
+    div[data-testid="stMetric"] label { opacity: 0.75; }
+    /* Sektionsoverskrifter med "eyebrow"-stil */
+    .section-eyebrow {
+        font-size: 0.72rem; letter-spacing: 0.09em; text-transform: uppercase;
+        opacity: 0.55; margin-bottom: 2px; font-weight: 600;
+    }
+    .section-title { font-size: 1.25rem; font-weight: 700; margin-bottom: 2px; }
+    .section-sub { font-size: 0.85rem; opacity: 0.65; margin-bottom: 14px; }
+    .section-block { border-top: 1px solid var(--border); padding-top: 18px; margin-top: 26px; }
     .index-banner {
         display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline;
-        padding: 18px 24px; border-radius: 12px; margin-bottom: 6px;
+        padding: 16px 22px; border-radius: 10px; margin-bottom: 6px;
+        border: 1px solid var(--border); background: var(--surface);
+        border-left-width: 4px;
     }
-    .index-banner.positive { background: rgba(22,163,74,0.12); border: 1px solid rgba(22,163,74,0.35); }
-    .index-banner.negative { background: rgba(220,38,38,0.12); border: 1px solid rgba(220,38,38,0.35); }
-    .index-banner .index-name { font-weight: 700; font-size: 1.25rem; }
-    .index-banner .index-change { font-weight: 700; font-size: 1.1rem; }
-    .index-banner.positive .index-change { color: #16a34a; }
-    .index-banner.negative .index-change { color: #dc2626; }
-    .index-banner .index-level { opacity: 0.65; font-size: 0.9rem; }
+    .index-banner.positive { border-left-color: var(--pos); }
+    .index-banner.negative { border-left-color: var(--neg); }
+    .index-banner .index-name { font-weight: 700; font-size: 1.2rem; }
+    .index-banner .index-change { font-weight: 700; font-size: 1.05rem; }
+    .index-banner.positive .index-change { color: var(--pos); }
+    .index-banner.negative .index-change { color: var(--neg); }
+    .index-banner .index-level { opacity: 0.6; font-size: 0.88rem; }
     .index-caption { opacity: 0.6; font-size: 0.8rem; margin-bottom: 18px; }
-    .info-box { padding: 14px 16px; border-radius: 8px; margin-bottom: 10px; color: white; }
-    .info-box.green { background-color: #1e7d34; }
-    .info-box.red { background-color: #a13030; }
-    .news-card { padding: 10px 14px; border-radius: 8px; background: rgba(128,128,128,0.08); margin-bottom: 8px; }
+    /* Top/bund-lister: dæmpede kort med farvet venstrekant i stedet for mættede farveflader */
+    .info-box {
+        padding: 12px 16px; border-radius: 10px; margin-bottom: 10px;
+        border: 1px solid var(--border); background: var(--surface); border-left-width: 4px;
+    }
+    .info-box.green { border-left-color: var(--pos); }
+    .info-box.red { border-left-color: var(--neg); }
+    .info-box b { font-size: 0.85rem; letter-spacing: 0.02em; }
+    .info-box .rank-mini-row { display: flex; justify-content: space-between; font-size: 0.83rem; padding: 2px 0; }
+    .info-box.green .rank-mini-row span:last-child { color: var(--pos); font-weight: 600; }
+    .info-box.red .rank-mini-row span:last-child { color: var(--neg); font-weight: 600; }
+    .news-card { padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); margin-bottom: 8px; }
     .news-card a { text-decoration: none; font-weight: 600; }
     .news-meta { font-size: 0.78rem; opacity: 0.65; margin-top: 2px; }
     .rank-table {
-        font-size: 0.8rem; max-width: 440px; margin-bottom: 22px;
-        border: 1px solid rgba(128,128,128,0.18); border-radius: 8px; padding: 4px 14px;
+        font-size: 0.82rem; max-width: 460px; margin-bottom: 22px;
+        border: 1px solid var(--border); border-radius: 10px; padding: 6px 16px;
+        background: var(--surface);
     }
-    .rank-title { font-size: 0.72rem; opacity: 0.55; padding: 4px 0; letter-spacing: 0.02em; }
-    .rank-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; opacity: 0.85; }
-    .rank-num { opacity: 0.45; width: 12px; }
+    .rank-title { font-size: 0.7rem; opacity: 0.55; padding: 5px 0; letter-spacing: 0.08em; font-weight: 600; }
+    .rank-row { display: flex; align-items: center; gap: 10px; padding: 3.5px 0; }
+    .rank-num { opacity: 0.4; width: 14px; font-variant-numeric: tabular-nums; }
     .rank-name { flex: 1; }
-    .rank-change { font-weight: 600; }
-    .info-box .rank-mini-row { display: flex; justify-content: space-between; font-size: 0.83rem; padding: 2px 0; opacity: 0.95; }
+    .rank-change { font-weight: 600; font-variant-numeric: tabular-nums; }
     .insight-box {
-        border: 1px solid rgba(128,128,128,0.18); border-radius: 10px; padding: 14px 18px;
-        margin-bottom: 18px; background: rgba(128,128,128,0.05);
+        border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px;
+        margin-bottom: 18px; background: var(--surface);
     }
-    .insight-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 6px; }
-    .insight-line { font-size: 0.88rem; padding: 2px 0; }
+    .insight-title { font-weight: 700; font-size: 0.92rem; margin-bottom: 6px; }
+    .insight-line { font-size: 0.87rem; padding: 2.5px 0; }
+    /* Kilde-fodnote under grafer og tabeller */
+    .source-note { font-size: 0.74rem; opacity: 0.55; margin: -6px 0 14px 0; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 st.title("📈 Live Aktiedashboard")
+
+
+def section_header(eyebrow: str, title: str, sub: str = ""):
+    """Ensartet sektionsoverskrift i institutionel rapportstil - lille kategori-linje øverst,
+    titel, og evt. undertekst."""
+    sub_html = f'<div class="section-sub">{sub}</div>' if sub else ""
+    st.markdown(
+        f'<div class="section-block"><div class="section-eyebrow">{eyebrow}</div>'
+        f'<div class="section-title">{title}</div>{sub_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def source_note(text: str):
+    """Diskret kildefodnote under en graf/tabel - bruges sammen med (?)-tooltips til at gøre
+    al dataproveniens synlig."""
+    st.markdown(f'<div class="source-note">{html.escape(text)}</div>', unsafe_allow_html=True)
 
 WIKI_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -119,6 +168,11 @@ NASDAQ100_FALLBACK = {
     "Nvidia": "NVDA", "Meta": "META", "Tesla": "TSLA", "Broadcom": "AVGO",
     "Costco": "COST", "Netflix": "NFLX", "Adobe": "ADBE", "PepsiCo": "PEP",
 }
+DOWJONES_FALLBACK = {
+    "Goldman Sachs": "GS", "Caterpillar": "CAT", "Microsoft": "MSFT", "Home Depot": "HD",
+    "Visa": "V", "UnitedHealth": "UNH", "McDonald's": "MCD", "Amgen": "AMGN",
+    "American Express": "AXP", "Boeing": "BA", "Apple": "AAPL", "JPMorgan Chase": "JPM",
+}
 OMXS30_FALLBACK = {
     "AstraZeneca": "AZN.ST", "Ericsson B": "ERIC-B.ST", "Volvo B": "VOLV-B.ST",
     "Atlas Copco A": "ATCO-A.ST", "Investor B": "INVE-B.ST", "H&M B": "HM-B.ST",
@@ -158,22 +212,36 @@ def get_sp500_sectors() -> dict:
 
 
 @st.cache_data(ttl=86_400)
+def _fetch_slickcharts_tickers(url: str) -> dict:
+    """Fælles parser for Slickcharts' indekslister (Nasdaq 100 og Dow Jones) - renser
+    selskabsnavne for juridiske suffikser som 'Inc.'/'Common Stock' for pænere visning."""
+    df = fetch_wiki_table(url, 0)
+    df = df.dropna(subset=["Company", "Symbol"])
+    suffixes = [
+        r"\s*,?\s*Class [A-Z]\s*Common Stock$", r"\s*,?\s*Common Stock$",
+        r"\s*,?\s*Common Shares$", r"\s*,?\s*Ordinary Shares$",
+        r"\s*,?\s*Inc\.$", r"\s*,?\s*Corp\.$", r"\s*,?\s*Corporation$",
+    ]
+    clean_names = df["Company"].astype(str)
+    for pattern in suffixes:
+        clean_names = clean_names.str.replace(pattern, "", regex=True)
+    clean_names = clean_names.str.rstrip(", ").str.strip()
+    return {name: symbol.replace(".", "-") for name, symbol in zip(clean_names, df["Symbol"])}
+
+
 def get_nasdaq100_tickers() -> dict:
     try:
-        df = fetch_wiki_table("https://www.slickcharts.com/nasdaq100", 0)
-        df = df.dropna(subset=["Company", "Symbol"])
-        suffixes = [
-            r"\s*,?\s*Class [A-Z]\s*Common Stock$", r"\s*,?\s*Common Stock$",
-            r"\s*,?\s*Common Shares$", r"\s*,?\s*Ordinary Shares$",
-            r"\s*,?\s*Inc\.$", r"\s*,?\s*Corp\.$", r"\s*,?\s*Corporation$",
-        ]
-        clean_names = df["Company"].astype(str)
-        for pattern in suffixes:
-            clean_names = clean_names.str.replace(pattern, "", regex=True)
-        clean_names = clean_names.str.rstrip(", ").str.strip()
-        return {name: symbol.replace(".", "-") for name, symbol in zip(clean_names, df["Symbol"])}
+        return _fetch_slickcharts_tickers("https://www.slickcharts.com/nasdaq100")
     except Exception:
         return NASDAQ100_FALLBACK
+
+
+@st.cache_data(ttl=86_400)
+def get_dowjones_tickers() -> dict:
+    try:
+        return _fetch_slickcharts_tickers("https://www.slickcharts.com/dowjones")
+    except Exception:
+        return DOWJONES_FALLBACK
 
 
 @st.cache_data(ttl=86_400)
@@ -226,29 +294,49 @@ C25_SECTORS = {
 }
 
 
+# Hver hjælpetekst slutter med kilde og beregningsmetode, så al dataproveniens er synlig
+# direkte i (?)-tooltippet - intet tal i dashboardet skal være uforklaret.
 COLUMN_HELP = {
-    "Kurs": "Seneste handlede kurs, i selskabets lokale valuta.",
+    "Kurs": (
+        "Seneste handlede kurs, i selskabets lokale valuta.\n\n"
+        "Kilde: Yahoo Finance, 1-minuts kursdata. Vist uden omregning."
+    ),
     "Ændring i dag (%)": (
         "Ændring i procent siden i går ved lukketid (forrige handelsdags lukkekurs) - ikke siden "
         "dagens åbning. +5% betyder 5% dyrere end i går. Dette er en relativ ændring i procent, "
-        "ikke procentpoint."
+        "ikke procentpoint.\n\n"
+        "Kilde: Yahoo Finance, 1-minuts kursdata. Egen beregning: (seneste kurs / forrige handelsdags "
+        "sidste kurs - 1) × 100. Metoden er verificeret mod Jyske Banks og Nasdaqs egne tal."
     ),
     "Volatilitet (år, %)": (
-        "Et mål for hvor MEGET kursen typisk svinger - ikke om den stiger eller falder. Beregnet ud "
-        "fra det seneste års daglige kursudsving, skaleret op til et helt år. Eksempel: står der 44,0, "
-        "betyder det at kursen statistisk set (i ca. 2 ud af 3 år) typisk svinger +/-44% omkring sit "
-        "udgangspunkt i løbet af et år. Højere tal = mere uforudsigelig aktie, ikke nødvendigvis en "
-        "dårligere aktie."
+        "Et mål for hvor MEGET kursen typisk svinger - ikke om den stiger eller falder. Eksempel: står "
+        "der 44,0, betyder det at kursen statistisk set (i ca. 2 ud af 3 år) typisk svinger +/-44% "
+        "omkring sit udgangspunkt i løbet af et år. Højere tal = mere uforudsigelig aktie, ikke "
+        "nødvendigvis en dårligere aktie.\n\n"
+        "Kilde: Yahoo Finance, 1 års daglige lukkekurser. Egen beregning: standardafvigelse af daglige "
+        "afkast × kvadratrod af 252 handelsdage (standard annualisering) × 100."
     ),
-    "Afkast 1 md (%)": "Den faktiske kursændring de seneste ca. 1 måned, ud fra reel historik. Ikke en forudsigelse om fremtiden.",
-    "Afkast 6 md (%)": "Den faktiske kursændring de seneste ca. 6 måneder, ud fra reel historik. Ikke en forudsigelse om fremtiden.",
-    "52u høj": "Højeste lukkekurs de seneste 52 uger (1 år).",
-    "52u lav": "Laveste lukkekurs de seneste 52 uger (1 år).",
-    "Trend": "Kursudviklingen de seneste ca. 30 handelsdage. Kun til at se retning/mønster - aksen er ikke ens på tværs af rækker.",
+    "Afkast 1 md (%)": (
+        "Den faktiske kursændring de seneste ca. 1 måned (22 handelsdage), ud fra reel historik. Ikke "
+        "en forudsigelse.\n\nKilde: Yahoo Finance, daglige lukkekurser. Egen beregning: "
+        "(seneste kurs / kursen 22 handelsdage tidligere - 1) × 100."
+    ),
+    "Afkast 6 md (%)": (
+        "Den faktiske kursændring de seneste ca. 6 måneder (126 handelsdage), ud fra reel historik. "
+        "Ikke en forudsigelse.\n\nKilde: Yahoo Finance, daglige lukkekurser. Egen beregning: "
+        "(seneste kurs / kursen 126 handelsdage tidligere - 1) × 100."
+    ),
+    "52u høj": "Højeste lukkekurs de seneste 52 uger.\n\nKilde: Yahoo Finance, 1 års daglige lukkekurser (maksimum af serien).",
+    "52u lav": "Laveste lukkekurs de seneste 52 uger.\n\nKilde: Yahoo Finance, 1 års daglige lukkekurser (minimum af serien).",
+    "Trend": (
+        "Kursudviklingen de seneste ca. 30 handelsdage. Kun til at se retning/mønster - aksen er ikke "
+        "ens på tværs af rækker.\n\nKilde: Yahoo Finance, daglige lukkekurser (vist rå, ingen beregning)."
+    ),
     "Markedsværdi": (
-        "Selskabets samlede børsværdi (kurs × antal udestående aktier), i selskabets lokale valuta. "
-        "Det er den mest almindelige måde at måle en virksomheds størrelse på et aktiemarked - jo "
-        "højere tal, jo større selskab."
+        "Selskabets samlede børsværdi, i selskabets lokale valuta - den mest almindelige måde at måle "
+        "en virksomheds størrelse på et aktiemarked.\n\n"
+        "Kilde: Yahoo Finance. Egen beregning: seneste kurs × antal udestående aktier (aktietal "
+        "hentes én gang i døgnet, kursen er live - så tallet følger altid den viste kurs)."
     ),
 }
 
@@ -273,6 +361,13 @@ INDEX_CONFIGS = [
         "market": {"open": time(9, 30), "close": time(16, 0), "tz": "America/New_York"},
         "get_tickers": get_nasdaq100_tickers,
         "get_sectors": lambda: {},  # Slickcharts leverer ikke sektordata for Nasdaq 100
+    },
+    {
+        "key": "dowjones", "flag": "🇺🇸", "short_name": "Dow Jones", "full_name": "Dow Jones Industrial Average",
+        "index_ticker": "^DJI",
+        "market": {"open": time(9, 30), "close": time(16, 0), "tz": "America/New_York"},
+        "get_tickers": get_dowjones_tickers,
+        "get_sectors": lambda: {},  # Slickcharts leverer ikke sektordata for Dow Jones
     },
     {
         "key": "omxs30", "flag": "🇸🇪", "short_name": "OMXS30", "full_name": "OMX Stockholm 30",
@@ -1347,86 +1442,361 @@ def get_forced_auctions() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
+def get_long_price_index() -> pd.DataFrame:
+    """Langt, kædet prisindeks 1992K1 -> nyeste kvartal for enfamiliehuse og ejerlejligheder.
+    DST's gamle kvartalsserie (EJ5) stopper i 2022K4; den nuværende serie (EJ99, 2015=100)
+    starter i 2015K1. De kædes her i 2015K1 med standard indekskædning: EJ5 skaleres så den
+    rammer EJ99's niveau i 2015K1, og EJ99 bruges uændret fra 2015K1 og frem. Det er samme
+    princip statistikbureauer selv bruger, når basisår skifter - dokumenteret i metodeboksen."""
+    try:
+        ej5 = fetch_dst_csv("EJ5", {"EJENDOMSKATE": ["0111", "2103"], "TAL": ["100"], "Tid": ["*"]})
+        ej99 = fetch_dst_csv("EJ99", {
+            "OMRÅDE": ["00"], "BOLTYP": ["0111", "2104"], "ENHED": ["100"], "Tid": ["*"],
+        })
+        pairs = [("Enfamiliehuse", "Enfamiliehuse", "Enfamiliehuse"),
+                 ("Ejerlejligheder, i alt", "Ejerlejlighed", "Ejerlejligheder")]
+        rows = []
+        for ej5_name, ej99_name, out_name in pairs:
+            old = ej5[ej5["EJENDOMSKATE"] == ej5_name].dropna(subset=["INDHOLD"]).set_index("TID")["INDHOLD"]
+            new = ej99[ej99["BOLTYP"] == ej99_name].dropna(subset=["INDHOLD"]).set_index("TID")["INDHOLD"]
+            if old.empty or new.empty or "2015K1" not in old.index or "2015K1" not in new.index:
+                continue
+            scale = new["2015K1"] / old["2015K1"]
+            for q, v in old.items():
+                if q < "2015K1":
+                    rows.append({"Boligtype": out_name, "Kvartal": q, "Indeks": v * scale})
+            for q, v in new.items():
+                rows.append({"Boligtype": out_name, "Kvartal": q, "Indeks": v})
+        return pd.DataFrame(rows).sort_values("Kvartal")
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_cpi_quarterly() -> pd.Series:
+    """Forbrugerprisindekset (2015=100) omregnet fra måneder til kvartalsgennemsnit -
+    bruges til at omregne nominelle boligpriser til realpriser (faste priser)."""
+    try:
+        df = fetch_dst_csv("PRIS01", {"VAREGR": ["000000"], "ENHED": ["100"], "Tid": ["*"]})
+        df = df.dropna(subset=["INDHOLD"])
+        df["Dato"] = df["TID"].apply(month_to_date)
+        df["Kvartal"] = df["Dato"].dt.year.astype(str) + "K" + df["Dato"].dt.quarter.astype(str)
+        return df.groupby("Kvartal")["INDHOLD"].mean()
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+@st.cache_data(ttl=300)
+def get_rent_index() -> pd.Series:
+    """DST's huslejeindeks for private boliger, hele landet (kvartalsvis fra 2021K1) -
+    bruges til price-to-rent-beregningen."""
+    try:
+        df = fetch_dst_csv("HUS1", {"REGION": ["000"], "EJENDOMSKATE": ["552"], "TAL": ["100"], "Tid": ["*"]})
+        df = df.dropna(subset=["INDHOLD"])
+        return df.set_index("TID")["INDHOLD"]
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+@st.cache_data(ttl=3_600)
+def get_equity_benchmark_quarterly() -> pd.Series:
+    """S&P 500 som kvartalsserie tilbage til 1992 (i USD) - bruges i 'mursten vs. aktier'-
+    sammenligningen. OMX C25 findes desværre kun tilbage til dec. 2016 hos Yahoo, så S&P 500
+    er det eneste aktiebenchmark med lige så lang historik som boligdataen."""
+    try:
+        data = yf.download("^GSPC", start="1992-01-01", interval="3mo", progress=False)
+        close = data["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close = close.dropna()
+        labels = close.index.year.astype(str) + "K" + close.index.quarter.astype(str)
+        return pd.Series(close.values, index=labels).groupby(level=0).first()
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def compute_cagr(series: pd.Series, quarters_back: int):
+    """Årlig gennemsnitlig vækstrate (CAGR) over de seneste N kvartaler af en indeksserie."""
+    if len(series) <= quarters_back:
+        return None
+    start, end = series.iloc[-1 - quarters_back], series.iloc[-1]
+    if start <= 0:
+        return None
+    years = quarters_back / 4
+    return ((end / start) ** (1 / years) - 1) * 100
+
+
+def compute_max_drawdown(series: pd.Series):
+    """Største fald fra top til efterfølgende bund i en indeksserie, i procent - klassisk
+    risikomål der viser det værste historiske tab, hvis man købte på toppen."""
+    if series.empty:
+        return None, None, None
+    running_max = series.cummax()
+    drawdown = (series / running_max - 1) * 100
+    trough_pos = drawdown.values.argmin()
+    peak_pos = series.values[:trough_pos + 1].argmax() if trough_pos > 0 else 0
+    return float(drawdown.iloc[trough_pos]), series.index[peak_pos], series.index[trough_pos]
+
+
 def show_housing_market():
-    st.subheader("🏠 Dansk boligmarked")
-    st.caption(
-        "Data fra Danmarks Statistiks officielle API (api.statbank.dk) - ægte, registrerede tal, "
-        "ikke skøn eller fremskrivning. Boligpriser offentliggøres i sagens natur ikke dagligt som "
-        "aktiekurser: en bolighandel skal først tinglyses og indberettes, før den tæller med i "
-        "statistikken, så selv de 'friskeste' officielle tal her er typisk et kvartal (ca. 3-6 "
-        "måneder) gamle. Det er sådan dansk boligstatistik reelt fungerer - ikke en begrænsning i "
-        "dette dashboard. Tvangsauktions-tallene nederst er den mest opdaterede indikator, DST har. "
-        "Siden tjekker for nye tal lige så ofte som resten af dashboardet (hvert 5. minut), så en ny "
-        "kvartalsvis offentliggørelse fanges hurtigt - men selve tallene fra DST bliver kun opdateret "
-        "kvartalsvis/månedligt i virkeligheden, uanset hvor tit vi tjekker."
+    section_header(
+        "EJENDOM · DANMARKS STATISTIK",
+        "Dansk ejendomsmarked - institutionelt overblik",
+        "Opbygget som en private equity-fonds markedsrapport: kapitalvækst, realafkast, relativ "
+        "værdiansættelse, likviditet og stress-indikatorer - alle tal fra officielle registre, "
+        "med metode og kilde ved hvert tal (hold musen over ?-ikonerne).",
     )
 
-    price_df = get_price_index_history()
+    with st.expander("📋 Metode og datakilder - læs hvordan hvert tal er beregnet"):
+        st.markdown(
+            """
+**Prisindeks (EJ99 / EJ5, Danmarks Statistik).** DST's boligprisindeks er *kvalitetskorrigerede*:
+de sammenligner salgsprisen med boligens offentlige vurdering (SPAR-metoden), så indekset måler
+prisudvikling for sammenlignelige boliger - ikke bare gennemsnittet af, hvad der tilfældigvis blev
+solgt. Derfor er indekset det rigtige mål for *prisudvikling*, mens gennemsnitspriserne længere
+nede er det rigtige mål for *prisniveau*.
+
+**Kædning af serier (egen beregning).** DST's gamle kvartalsserie (EJ5) stopper i 2022K4, og den
+nuværende (EJ99) starter i 2015K1. Vi kæder dem i 2015K1: den gamle serie skaleres, så den rammer
+den nyes niveau i kædekvartalet - samme princip statistikbureauer selv bruger ved basisårsskift.
+Det giver én ubrudt serie 1992-i dag.
+
+**Realpriser (egen beregning).** Nominelt indeks divideret med forbrugerprisindekset (PRIS01,
+2015=100, kvartalsgennemsnit af måneder). Realprisen viser udviklingen i boligens *købekraft* -
+den fjerner inflations-illusionen.
+
+**CAGR (egen beregning).** Årlig gennemsnitlig vækstrate: (slutindeks/startindeks)^(1/år) - 1.
+Standardmålet for kapitalvækst i PE- og wealth management-rapporter.
+
+**Max drawdown (egen beregning).** Største fald fra historisk top til efterfølgende bund.
+Viser det værste realiserede tab for en investor, der købte på toppen - det centrale risikomål
+for illikvide aktiver.
+
+**Price-to-rent (egen beregning).** Prisindeks divideret med DST's huslejeindeks (HUS1), begge
+rebaseret til 100 i 2021K1. Boligmarkedets svar på aktiers P/E: stiger priserne hurtigere end
+lejen, bliver ejerboliger relativt dyrere end alternativet (leje) - historisk et tegn på strakt
+værdiansættelse. Kort serie (huslejeindekset findes først fra 2021).
+
+**Gennemsnitspriser og salgstal (EJEN77).** Kun *almindelig fri handel* - familieoverdragelser
+og andre ikke-markedsmæssige handler er sorteret fra. Gennemsnitspris er aritmetisk gennemsnit
+af faktiske tinglyste handler; den er IKKE kvalitetskorrigeret og kan derfor svinge med, *hvad*
+der bliver solgt (flere store huse → højere snit, uden at priserne er steget).
+
+**Tvangsauktioner (TVANG1).** Antal bekendtgjorte tvangsauktioner - rå optælling fra
+Statstidende, månedlig og kun ca. en måned forsinket.
+            """
+        )
+
+    long_df = get_long_price_index()
     changes_df = get_price_index_changes()
     regional_df = get_regional_prices()
     auctions_df = get_forced_auctions()
+    cpi = get_cpi_quarterly()
+    rent = get_rent_index()
 
-    if price_df.empty:
+    if long_df.empty:
         st.warning("Kunne ikke hente boligdata fra Danmarks Statistik lige nu. Prøv igen om lidt.")
         return
 
-    property_types = list(PROPERTY_TYPES_EJ99.keys())
-
-    st.markdown("### 📊 Seneste udvikling i priserne")
-    cols = st.columns(len(property_types))
-    for col, ptype in zip(cols, property_types):
+    # ---- 1) Executive summary -------------------------------------------------
+    section_header("1 · MOMENTUM", "Seneste offentliggjorte prisudvikling",
+                   "År-til-år er hovedtallet; kvartal-til-kvartal viser den seneste bevægelse.")
+    kpi_types = list(PROPERTY_TYPES_EJ99.keys())
+    cols = st.columns(len(kpi_types))
+    for col, ptype in zip(cols, kpi_types):
         sub = changes_df[changes_df["Boligtype"] == ptype] if not changes_df.empty else pd.DataFrame()
         qoq = sub[sub["Måltype"].str.contains("kvartalet før", na=False)].dropna(subset=["Ændring"])
         yoy = sub[sub["Måltype"].str.contains("året før", na=False)].dropna(subset=["Ændring"])
         qoq_val = qoq["Ændring"].iloc[-1] if not qoq.empty else None
         yoy_val = yoy["Ændring"].iloc[-1] if not yoy.empty else None
-        quarter_label = qoq["Kvartal"].iloc[-1] if not qoq.empty else "–"
+        q_label = qoq["Kvartal"].iloc[-1] if not qoq.empty else "–"
+        display_name = "Ejerlejligheder" if ptype == "Ejerlejlighed" else ptype
         with col:
             st.metric(
-                ptype,
-                f"{yoy_val:+.1f}% år-til-år" if yoy_val is not None else "–",
-                f"{qoq_val:+.1f}% ift. kvartalet før" if qoq_val is not None else None,
+                display_name,
+                f"{yoy_val:+.1f}% å/å" if yoy_val is not None else "–",
+                f"{qoq_val:+.1f}% k/k" if qoq_val is not None else None,
                 help=(
-                    f"Seneste offentliggjorte tal: {quarter_label}. Kilde: Danmarks Statistik, "
-                    "tabel EJ99. Procent, ikke procentpoint."
+                    f"Seneste offentliggjorte kvartal: {q_label}.\n\n"
+                    "Kilde: Danmarks Statistik, tabel EJ99 (kvalitetskorrigeret prisindeks). "
+                    "DST's egne beregnede ændringstal - ingen egen beregning. Procent, ikke procentpoint."
                 ),
             )
-    latest_quarter = price_df["Kvartal"].iloc[-1]
-    st.caption(f"Seneste kvartal med prisindeks: {latest_quarter}. Tal kan blive revideret, efterhånden som flere handler når at blive tinglyst.")
 
-    st.markdown("### 📈 Prisindeks over tid (2015 = 100)")
-    st.caption(
-        "Indeks 100 = prisniveauet i 2015. Står der 115, betyder det at prisniveauet er 15% højere "
-        "end i 2015 - et historisk mål, ikke en forudsigelse om fremtiden."
+    # ---- 2) Kapitalvækst: langt indeks + CAGR + drawdown ---------------------
+    section_header("2 · KAPITALVÆKST", "34 års prisudvikling (1992 - i dag)",
+                   "Kædet indeks - se metodeboksen. Skift mellem nominelt og realt (inflationsjusteret).")
+    real_toggle = st.radio("Visning:", ["Nominelt", "Realt (inflationsjusteret)"], horizontal=True, key="housing_real")
+    colors = {"Enfamiliehuse": "#2563eb", "Ejerlejligheder": "#7c3aed"}
+    fig = go.Figure()
+    cagr_rows = []
+    for ptype in ["Enfamiliehuse", "Ejerlejligheder"]:
+        sub = long_df[long_df["Boligtype"] == ptype].set_index("Kvartal")["Indeks"].sort_index()
+        if sub.empty:
+            continue
+        series = sub
+        if real_toggle.startswith("Realt") and not cpi.empty:
+            common = sub.index.intersection(cpi.index)
+            series = (sub[common] / cpi[common] * 100).dropna()
+        rebased = series / series.iloc[0] * 100
+        dates = [quarter_to_date(q) for q in rebased.index]
+        fig.add_trace(go.Scatter(x=dates, y=rebased.values, mode="lines", name=ptype,
+                                 line=dict(color=colors[ptype], width=2.5)))
+        dd, dd_peak, dd_trough = compute_max_drawdown(sub)
+        cagr_rows.append({
+            "Boligtype": ptype,
+            "CAGR 1 år": compute_cagr(sub, 4), "CAGR 5 år": compute_cagr(sub, 20),
+            "CAGR 10 år": compute_cagr(sub, 40), "CAGR 20 år": compute_cagr(sub, 80),
+            "Max drawdown": dd, "Drawdown-periode": f"{dd_peak} → {dd_trough}" if dd_peak else "–",
+        })
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=10), height=420,
+        yaxis=dict(title="Indeks (start = 100)", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+        xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), hovermode="x unified",
     )
-    selected_types = st.multiselect("Boligtype:", property_types, default=property_types, key="housing_types")
-    if selected_types:
-        plot_df = price_df[price_df["Boligtype"].isin(selected_types)].copy()
-        plot_df["Dato"] = plot_df["Kvartal"].apply(quarter_to_date)
-        colors = {"Enfamiliehuse": "#2563eb", "Ejerlejlighed": "#7c3aed", "Andelsboliger": "#059669"}
-        fig = go.Figure()
-        for ptype in selected_types:
-            sub = plot_df[plot_df["Boligtype"] == ptype].sort_values("Dato")
-            fig.add_trace(go.Scatter(
-                x=sub["Dato"], y=sub["Indeks"], mode="lines", name=ptype,
-                line=dict(color=colors.get(ptype, "#888"), width=2.5),
-            ))
-        fig.update_layout(
-            margin=dict(l=10, r=10, t=10, b=10), height=400,
-            yaxis=dict(title="Indeks (2015=100)", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
-            xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            hovermode="x unified",
+    st.plotly_chart(fig, width="stretch")
+    source_note(
+        "Kilde: Danmarks Statistik EJ5 (1992-2022) kædet med EJ99 (2015-) i 2015K1; realpriser deflateret "
+        "med forbrugerprisindekset PRIS01. Kædning og deflatering er egne beregninger - se metodeboksen."
+    )
+
+    if cagr_rows:
+        cagr_df = pd.DataFrame(cagr_rows)
+        st.dataframe(
+            cagr_df.style.format({
+                "CAGR 1 år": "{:+.1f}%", "CAGR 5 år": "{:+.1f}%",
+                "CAGR 10 år": "{:+.1f}%", "CAGR 20 år": "{:+.1f}%", "Max drawdown": "{:.1f}%",
+            }, na_rep="–"),
+            hide_index=True, width="stretch",
+            column_config={
+                "CAGR 1 år": st.column_config.NumberColumn(help="Årlig gennemsnitlig vækst seneste 4 kvartaler. Kilde: kædet DST-indeks (nominelt); egen beregning: (slut/start)^(1/år)-1."),
+                "CAGR 5 år": st.column_config.NumberColumn(help="Årlig gennemsnitlig vækst seneste 20 kvartaler. Samme kilde og formel."),
+                "CAGR 10 år": st.column_config.NumberColumn(help="Årlig gennemsnitlig vækst seneste 40 kvartaler. Samme kilde og formel."),
+                "CAGR 20 år": st.column_config.NumberColumn(help="Årlig gennemsnitlig vækst seneste 80 kvartaler. Samme kilde og formel."),
+                "Max drawdown": st.column_config.NumberColumn(help="Største fald fra top til bund i hele serien 1992-i dag (nominelt). Egen beregning på kædet DST-indeks."),
+            },
         )
-        st.plotly_chart(fig, width="stretch")
+    with st.expander("🎓 Lær: CAGR, realafkast og drawdown - de tre tal en formueforvalter kigger på først"):
+        st.markdown(
+            """
+- **CAGR** glatter udsving ud og gør vidt forskellige perioder sammenlignelige. En bolig der er
+  steget 100% på 10 år, har kun givet ~7,2% om året - renters rente snyder øjet.
+- **Realafkast** er det eneste, der kan købes noget for. 1970'ernes tocifrede nominelle
+  boligprisstigninger dækkede over *fald* i købekraft. Skift til "Realt" ovenfor og se, hvor
+  meget af de 34 års stigning inflationen æder.
+- **Max drawdown** er illikvide aktivers akilleshæl: efter finanskrisen faldt ejerlejligheder
+  ~30% nominelt, og med typisk 80% belåning var egenkapitalen i mange boliger reelt nul. Gearing
+  forstærker både op- og nedture - det er lektionen.
+            """
+        )
 
-    st.markdown("### 🗺️ Regional sammenligning")
-    st.caption(
-        "Gennemsnitspris ved almindelig fri handel, seneste tilgængelige kvartal. Kilde: Danmarks "
-        "Statistik, tabel EJEN77. 'Landsdele' er det mest detaljerede geografiske niveau DST "
-        "offentliggør boligpriser på - ned til kommune eller bydel (fx Valby) findes desværre ikke "
-        "i den officielle prisstatistik."
-    )
+    # ---- 3) Mursten vs. aktier ------------------------------------------------
+    section_header("3 · AKTIVKLASSER", "Mursten vs. aktier siden 1992",
+                   "Samme 100 kr. investeret i 1992 - dansk boligprisindeks mod S&P 500.")
+    equity = get_equity_benchmark_quarterly()
+    houses = long_df[long_df["Boligtype"] == "Enfamiliehuse"].set_index("Kvartal")["Indeks"].sort_index()
+    if not equity.empty and not houses.empty:
+        common = houses.index.intersection(equity.index)
+        h = houses[common] / houses[common].iloc[0] * 100
+        e = equity[common] / equity[common].iloc[0] * 100
+        fig3 = go.Figure()
+        fig3.add_trace(go.Scatter(x=[quarter_to_date(q) for q in h.index], y=h.values,
+                                  mode="lines", name="Enfamiliehuse (DK, prisindeks)", line=dict(color="#2563eb", width=2.5)))
+        fig3.add_trace(go.Scatter(x=[quarter_to_date(q) for q in e.index], y=e.values,
+                                  mode="lines", name="S&P 500 (USD, kursindeks)", line=dict(color="#d97706", width=2.5)))
+        fig3.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10), height=400,
+            yaxis=dict(title="Indeks (1992 = 100)", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+            xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), hovermode="x unified",
+        )
+        st.plotly_chart(fig3, width="stretch")
+        source_note(
+            "Kilder: kædet DST-prisindeks (DKK) og Yahoo Finance ^GSPC (USD), begge rebaseret til 100 i 1992 "
+            "(egen beregning). Vigtige forbehold: S&P 500 er i USD (valutaeffekt ikke medregnet), uden udbytter; "
+            "boligindekset er uden lejeværdi/omkostninger. Sammenligningen viser kun ren prisudvikling."
+        )
+        with st.expander("🎓 Lær: hvorfor sammenligningen halter - og alligevel er nyttig"):
+            st.markdown(
+                """
+- **Totalafkast mangler på begge sider.** Aktier udbetaler udbytte (~2% årligt for S&P 500), og
+  boliger har en "lejeværdi" (man sparer husleje) minus vedligehold, skat og finansiering. Begge
+  kurver undervurderer altså det reelle afkast - men på hver sin måde.
+- **Gearing ændrer alt.** Ingen køber aktier med 80% lån, men næsten alle køber bolig sådan. Med
+  4x gearing bliver boligens beskedne prisvækst til et stort egenkapitalafkast - og omvendt i
+  nedture. Det er derfor, ejendomme fylder så meget i private formuer.
+- **Likviditet er prisen for roen.** Aktier kan sælges på sekunder; en bolig tager måneder og
+  koster 1-3% i handelsomkostninger. Illikvide aktiver *ser* mindre volatile ud, fordi de ikke
+  prissættes hvert sekund - det kaldes volatility laundering i PE-branchen.
+                """
+            )
+
+    # ---- 4) Relativ værdiansættelse: price-to-rent ---------------------------
+    section_header("4 · VÆRDIANSÆTTELSE", "Price-to-rent: pris ift. leje",
+                   "Boligmarkedets P/E. Over 100 = priserne er løbet fra lejen siden 2021.")
+    if not rent.empty:
+        flats = long_df[long_df["Boligtype"] == "Ejerlejligheder"].set_index("Kvartal")["Indeks"].sort_index()
+        common = flats.index.intersection(rent.index)
+        common = [q for q in common if q >= "2021K1"]
+        if common:
+            ptr = (flats[common] / flats[common[0]]) / (rent[common] / rent[common[0]]) * 100
+            fig4 = go.Figure()
+            fig4.add_trace(go.Scatter(x=[quarter_to_date(q) for q in ptr.index], y=ptr.values,
+                                      mode="lines+markers", name="Price-to-rent (2021K1=100)",
+                                      line=dict(color="#0f766e", width=2.5)))
+            fig4.add_hline(y=100, line_dash="dot", line_color="rgba(128,128,128,0.6)")
+            fig4.update_layout(
+                margin=dict(l=10, r=10, t=10, b=10), height=320,
+                yaxis=dict(title="Indeks (2021K1 = 100)", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+                xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig4, width="stretch")
+            latest_ptr = ptr.iloc[-1]
+            retning = "dyrere" if latest_ptr > 100 else "billigere"
+            st.metric(
+                "Aktuel price-to-rent", f"{latest_ptr:.1f}",
+                f"Ejerlejligheder er blevet {abs(latest_ptr-100):.0f}% {retning} relativt til leje siden 2021",
+                help=(
+                    "Kilder: DST EJ99 (prisindeks, ejerlejligheder) og DST HUS1 (huslejeindeks, private "
+                    "boliger).\n\nEgen beregning: (prisindeks/pris 2021K1) ÷ (huslejeindeks/husleje 2021K1) "
+                    "× 100. Serien kan først beregnes fra 2021, hvor huslejeindekset starter."
+                ),
+            )
+    else:
+        st.info("Huslejeindekset kunne ikke hentes lige nu - price-to-rent udelades.")
+
+    # ---- 5) Likviditet: handelsvolumen ---------------------------------------
+    section_header("5 · LIKVIDITET", "Handelsaktivitet: antal frie handler pr. kvartal",
+                   "Volumen vender ofte før priserne - få handler = illikvidt marked, hvor priser er usikre.")
+    if not regional_df.empty:
+        vol = regional_df[
+            (regional_df["Nøgletal"] == "Salg ved prisberegning (antal)")
+            & (regional_df["Region"] == "Hele landet")
+        ].dropna(subset=["Værdi"])
+        if not vol.empty:
+            fig5 = go.Figure()
+            for ptype, color in [("Enfamiliehuse", "#2563eb"), ("Ejerlejligheder, i alt", "#7c3aed")]:
+                v = vol[vol["Boligtype"] == ptype].sort_values("Kvartal").tail(40)
+                fig5.add_trace(go.Bar(x=[quarter_to_date(q) for q in v["Kvartal"]], y=v["Værdi"],
+                                      name=ptype.replace(", i alt", "")))
+            fig5.update_layout(
+                barmode="group", margin=dict(l=10, r=10, t=10, b=10), height=320,
+                yaxis=dict(title="Antal handler", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+                xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            )
+            st.plotly_chart(fig5, width="stretch")
+            source_note(
+                "Kilde: Danmarks Statistik EJEN77, 'Salg ved prisberegning (antal)', kun almindelig fri handel, "
+                "hele landet. Rå tal fra DST - ingen egen beregning."
+            )
+
+    # ---- 6) Regionalt prisniveau ----------------------------------------------
+    section_header("6 · GEOGRAFI", "Prisniveau på tværs af landet",
+                   "Gennemsnitspris ved fri handel, seneste kvartal. Landsdele er DST's mest detaljerede prisniveau "
+                   "- kommune-/bydelstal findes ikke i den officielle prisstatistik.")
     if not regional_df.empty:
         col_a, col_b = st.columns([1, 1])
         with col_a:
@@ -1448,8 +1818,6 @@ def show_housing_market():
             latest_q = avg_price["Kvartal"].max()
             latest_rows = avg_price[avg_price["Kvartal"] == latest_q]
             country_row = latest_rows[latest_rows["Region"] == "Hele landet"]
-            # Kun de områder der matcher det valgte niveau (regioner ELLER landsdele), sorteret med
-            # dyreste/"mest guf" øverst - undgår at blande de to geografiske niveauer i én rangering.
             avg_price_latest = latest_rows[latest_rows["Region"].isin(area_names)].sort_values("Værdi", ascending=False)
             sales_latest = sales_count[sales_count["Kvartal"] == latest_q].set_index("Region")["Værdi"]
 
@@ -1472,54 +1840,419 @@ def show_housing_market():
             if not country_row.empty:
                 landsgns = country_row["Værdi"].iloc[0]
                 st.caption(f"Landsgennemsnit ({latest_q}): {landsgns:,.0f}".replace(",", ".") + " t.kr.")
-        else:
-            st.info("Ingen regionale prisdata tilgængelige for den valgte boligtype lige nu.")
-    else:
-        st.info("Regionale tal ikke tilgængelige lige nu.")
+            source_note(
+                "Kilde: Danmarks Statistik EJEN77, gennemsnitspris pr. ejendom ved almindelig fri handel. "
+                "OBS: gennemsnit er ikke kvalitetskorrigerede - sammensætningen af solgte boliger påvirker tallet."
+            )
 
-    st.markdown("### ⚠️ Tvangsauktioner (mest aktuelle indikator)")
-    st.caption(
-        "Antal bekendtgjorte tvangsauktioner pr. måned - den mest opdaterede boligmarkeds-indikator "
-        "Danmarks Statistik offentliggør. Et stigende antal kan pege på et boligmarked under pres, "
-        "men er IKKE det samme som boligpriser og bør ikke tolkes som en prisprognose."
-    )
+    # ---- 7) Stress: tvangsauktioner -------------------------------------------
+    section_header("7 · STRESS", "Tvangsauktioner - markedets kanariefugl",
+                   "Månedlig og kun ca. én måned forsinket: den hurtigste officielle indikator for nød i markedet.")
     if not auctions_df.empty:
         total_df = auctions_df[auctions_df["Område"] == "Tvangsauktioner i alt"].dropna(subset=["Antal"]).copy()
         if not total_df.empty:
             total_df["Dato"] = total_df["Måned"].apply(month_to_date)
-            total_df = total_df.sort_values("Dato").tail(36)
-            fig2 = go.Figure()
-            fig2.add_trace(go.Bar(x=total_df["Dato"], y=total_df["Antal"], marker_color="#dc2626"))
-            fig2.update_layout(
-                margin=dict(l=10, r=10, t=10, b=10), height=280,
-                yaxis=dict(title="Antal tvangsauktioner", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+            total_df = total_df.sort_values("Dato")
+            plot_df = total_df.tail(48)
+            rolling = total_df["Antal"].rolling(12).mean().tail(48)
+            fig6 = go.Figure()
+            fig6.add_trace(go.Bar(x=plot_df["Dato"], y=plot_df["Antal"], name="Pr. måned", marker_color="rgba(185,28,28,0.55)"))
+            fig6.add_trace(go.Scatter(x=plot_df["Dato"], y=rolling.values, name="12 mdr. glidende gns.",
+                                      line=dict(color="#b91c1c", width=2.5)))
+            fig6.update_layout(
+                margin=dict(l=10, r=10, t=10, b=10), height=320,
+                yaxis=dict(title="Antal", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
                 xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
             )
-            st.plotly_chart(fig2, width="stretch")
-            st.caption(f"Seneste måned med data: {total_df['Måned'].iloc[-1]} ({int(total_df['Antal'].iloc[-1])} tvangsauktioner i alt).")
-        else:
-            st.info("Ingen data om tvangsauktioner tilgængelige lige nu.")
-    else:
-        st.info("Data om tvangsauktioner ikke tilgængelige lige nu.")
+            st.plotly_chart(fig6, width="stretch")
+            hist_avg = float(total_df["Antal"].mean())
+            latest_val = int(total_df["Antal"].iloc[-1])
+            m1, m2 = st.columns(2)
+            m1.metric(
+                "Seneste måned", f"{latest_val}",
+                f"{total_df['Måned'].iloc[-1]}",
+                help="Kilde: Danmarks Statistik TVANG1 (bekendtgjorte tvangsauktioner, alle typer). Rå tal - ingen egen beregning.",
+            )
+            m2.metric(
+                "Historisk månedsgennemsnit (1979-)", f"{hist_avg:.0f}",
+                f"Aktuelt niveau er {latest_val / hist_avg * 100:.0f}% af historisk snit",
+                help="Kilde: DST TVANG1, hele seriens historik. Egen beregning: simpelt gennemsnit af alle måneder samt seneste måned som andel heraf.",
+            )
+            with st.expander("🎓 Lær: hvorfor PE-fonde elsker denne graf"):
+                st.markdown(
+                    """
+Tvangsauktioner er en *omvendt* indikator: lave tal betyder, at ejerne kan betale deres lån -
+altså et sundt, men også dyrt marked. **Stigende tvangsauktioner er historisk kommet FØR prisfald**,
+fordi tvangssalg sker til discount og skaber sammenlignelige handler på lave niveauer. I 2009-2012
+toppede kurven samtidig med, at distressed-fonde købte op i stor stil. Det er den slags asymmetri
+("andres nød er min discount"), opportunistiske ejendomsfonde lever af - og grunden til at antal
+tvangsauktioner står i enhver dansk ejendomsrapport.
+                    """
+                )
 
     st.markdown("---")
     st.caption(
-        "Kilde: Danmarks Statistik (dst.dk), tabellerne EJ99, EJEN77 og TVANG1, hentet direkte via "
-        "det officielle API api.statbank.dk. Intet på denne fane er fremskrevet eller gættet."
+        "Alle kilder: Danmarks Statistik (api.statbank.dk, tabellerne EJ5, EJ99, EJEN77, HUS1, PRIS01, "
+        "TVANG1) samt Yahoo Finance (^GSPC). Egne beregninger (kædning, deflatering, CAGR, drawdown, "
+        "price-to-rent, rebasering) er dokumenteret i metodeboksen øverst og i tooltips. Intet er "
+        "fremskrevet eller gættet - og intet her er investeringsrådgivning."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Centralbank-fane: pengepolitiske renter fra fire officielle kilder - Danmarks
+# Nationalbank (via DST), ECB (ECB Data Portal), Fed (New York Fed) og
+# Riksbanken (SWEA API). Alle åbne, officielle API'er uden nøgler.
+# ---------------------------------------------------------------------------
+
+
+def _parse_dst_daydate(s: str) -> pd.Timestamp:
+    # DST's dagsformat: '2026M09D09'
+    return pd.Timestamp(year=int(s[:4]), month=int(s[5:7]), day=int(s[8:10]))
+
+
+@st.cache_data(ttl=300)
+def get_nationalbanken_latest() -> pd.DataFrame:
+    """Nationalbankens NYESTE officielle rentesatser (seneste dagsobservation) via DST-tabellen
+    DNRENTD. Hele dagsserien fra 1983 er for tung at hente live (API-timeout, testet), så seneste
+    dag hentes separat her, og historikken hentes som månedsserie i funktionen nedenfor."""
+    try:
+        df = fetch_dst_csv("DNRENTD", {
+            "INSTRUMENT": ["OFONAA", "OIBNAA", "OIRNAA", "ODKNAA"],
+            "LAND": ["DK"], "OPGOER": ["E"], "Tid": ["(1)"],
+        })
+        df = df.dropna(subset=["INDHOLD"])
+        df["Dato"] = df["TID"].apply(_parse_dst_daydate)
+        return df.rename(columns={"INSTRUMENT": "Instrument", "INDHOLD": "Rente"})
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_nationalbanken_history() -> pd.DataFrame:
+    """Nationalbankens foliorente som månedsserie fra 1987 (DST-tabellen DNRENTM) - bruges
+    til historikgrafen, hvor månedsopløsning er rigeligt."""
+    try:
+        df = fetch_dst_csv("DNRENTM", {
+            "INSTRUMENT": ["OFONAA"], "LAND": ["DK"], "OPGOER": ["E"], "Tid": ["*"],
+        })
+        df = df.dropna(subset=["INDHOLD"])
+        df["Dato"] = df["TID"].apply(month_to_date)
+        return df.rename(columns={"INSTRUMENT": "Instrument", "INDHOLD": "Rente"})
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_ecb_rates() -> pd.DataFrame:
+    """ECB's officielle pengepolitiske satser (indlånsfacilitet DFR og hovedrefinansiering MRO)
+    fra ECB's åbne dataportal. Serien indeholder kun ændringsdatoer - den udfyldes til en
+    dag-for-dag-serie (step-serie) i visningen."""
+    rows = []
+    for code, name in [("DFR", "ECB indlånsrente (DFR)"), ("MRR_FR", "ECB hovedrente (MRO)")]:
+        try:
+            url = f"https://data-api.ecb.europa.eu/service/data/FM/B.U2.EUR.4F.KR.{code}.LEV?format=csvdata"
+            r = requests.get(url, timeout=25)
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text))
+            for _, row in df.iterrows():
+                rows.append({"Instrument": name, "Dato": pd.Timestamp(row["TIME_PERIOD"]), "Rente": float(row["OBS_VALUE"])})
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=300)
+def get_fed_rates() -> pd.DataFrame:
+    """Federal Reserves effektive dagsrente (EFFR) inkl. det officielle målbånd, fra
+    New York Feds åbne API (op til 250 seneste bankdage)."""
+    try:
+        r = requests.get("https://markets.newyorkfed.org/api/rates/unsecured/effr/last/250.json", timeout=25)
+        r.raise_for_status()
+        rows = []
+        for obs in r.json().get("refRates", []):
+            rows.append({
+                "Dato": pd.Timestamp(obs["effectiveDate"]), "Rente": float(obs["percentRate"]),
+                "MålFra": obs.get("targetRateFrom"), "MålTil": obs.get("targetRateTo"),
+            })
+        return pd.DataFrame(rows).sort_values("Dato")
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_riksbank_rate() -> pd.DataFrame:
+    """Riksbankens styringsrente (dagsserie) fra Riksbankens åbne SWEA-API."""
+    try:
+        start = (datetime.now() - timedelta(days=365 * 20)).strftime("%Y-%m-%d")
+        end = datetime.now().strftime("%Y-%m-%d")
+        r = requests.get(f"https://api.riksbank.se/swea/v1/Observations/SECBREPOEFF/{start}/{end}",
+                         headers={"Accept": "application/json"}, timeout=25)
+        r.raise_for_status()
+        df = pd.DataFrame(r.json())
+        df["Dato"] = pd.to_datetime(df["date"])
+        return df.rename(columns={"value": "Rente"})[["Dato", "Rente"]]
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_dk_inflation():
+    """Seneste danske inflation (år-til-år, forbrugerprisindekset) - DST's egne ændringstal."""
+    try:
+        df = fetch_dst_csv("PRIS01", {"VAREGR": ["000000"], "ENHED": ["300"], "Tid": ["*"]})
+        df = df.dropna(subset=["INDHOLD"])
+        return float(df["INDHOLD"].iloc[-1]), df["TID"].iloc[-1]
+    except Exception:
+        return None, None
+
+
+@st.cache_data(ttl=300)
+def get_bank_transmission() -> pd.DataFrame:
+    """Bankernes gennemsnitlige udlånsrente til boligkøb og husholdningernes indlånsrente
+    (kvartal, DST MPK18) - viser hvordan pengepolitikken rammer almindelige menneskers økonomi."""
+    try:
+        df = fetch_dst_csv("MPK18", {"SEKTOR": ["50", "S14"], "UDINDLÅN": ["*"], "Tid": ["*"]})
+        return df.dropna(subset=["INDHOLD"])
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=120)
+def get_rate_news(max_age_hours: float = 1.0) -> list:
+    """Nyheder om renter/pengepolitik, højst 1 time gamle, fra navngivne medier via Yahoo
+    Finance. Søger på tværs af makro-relaterede tickers og filtrerer på rente-nøgleord.
+    Renteafgørelser kommer få gange om året, så boksen vil ofte - helt korrekt - være tom."""
+    keywords = ["rate", "rente", "fed", "ecb", "central bank", "nationalbank", "riksbank",
+                "inflation", "monetary", "pengepolitik", "styringsrente", "rate cut", "rate hike"]
+    articles, seen = [], set()
+    for ticker in ["^TNX", "^GSPC", "EURUSD=X", "^DJI"]:
+        for art in get_news(ticker, limit=10, max_age_hours=max_age_hours):
+            title_lower = art["title"].lower()
+            if art["url"] in seen or not any(k in title_lower for k in keywords):
+                continue
+            seen.add(art["url"])
+            articles.append(art)
+    return articles[:5]
+
+
+NB_INSTRUMENT_LABELS = {
+    "Nationalbankens rente - Folioindskud (Aug 1987- )": "Foliorente",
+    "Nationalbankens rente - Indskudsbeviser (Apr. 1992-)": "Indskudsbevisrente",
+    "Nationalbankens rente - Udlån (Apr. 1992-)": "Udlånsrente",
+    "Nationalbankens rente - Diskonto (Aug. 1987-)": "Diskonto",
+}
+
+
+def show_central_banks():
+    section_header(
+        "PENGEPOLITIK · FIRE CENTRALBANKER",
+        "Centralbanker og renter",
+        "Nationalbanken, ECB, Fed og Riksbanken - live satser, fuld historik og hvad det betyder "
+        "for din økonomi. Renten er tyngdekraften i al formueforvaltning: den prissætter alt andet.",
+    )
+
+    nb = get_nationalbanken_latest()
+    nb_hist = get_nationalbanken_history()
+    ecb = get_ecb_rates()
+    fed = get_fed_rates()
+    riks = get_riksbank_rate()
+    inflation, inflation_month = get_dk_inflation()
+
+    # ---- KPI-række: seneste sats fra hver bank --------------------------------
+    section_header("1 · LIGE NU", "Aktuelle pengepolitiske satser", "")
+    c1, c2, c3, c4 = st.columns(4)
+    nb_folio = None
+    if not nb.empty:
+        folio = nb[nb["Instrument"].str.contains("Folioindskud", na=False)].sort_values("Dato")
+        if not folio.empty:
+            nb_folio = float(folio["Rente"].iloc[-1])
+            c1.metric(
+                "🇩🇰 Nationalbanken (folio)", f"{nb_folio:.2f}%",
+                f"pr. {folio['Dato'].iloc[-1]:%d.%m.%Y}",
+                help="Foliorenten - Nationalbankens toneangivende sats (forrentning af bankernes indeståender).\n\nKilde: Danmarks Nationalbank via Danmarks Statistik, tabel DNRENTD (dagsobservationer). Rå officiel sats - ingen egen beregning.",
+            )
+    ecb_dfr = None
+    if not ecb.empty:
+        dfr = ecb[ecb["Instrument"].str.contains("DFR", na=False)].sort_values("Dato")
+        if not dfr.empty:
+            ecb_dfr = float(dfr["Rente"].iloc[-1])
+            c2.metric(
+                "🇪🇺 ECB (indlån/DFR)", f"{ecb_dfr:.2f}%",
+                f"siden {dfr['Dato'].iloc[-1]:%d.%m.%Y}",
+                help="ECB's indlånsrente (deposit facility rate) - den toneangivende euro-sats i dag.\n\nKilde: ECB Data Portal (data-api.ecb.europa.eu), serie FM.B.U2.EUR.4F.KR.DFR.LEV. Rå officiel sats.",
+            )
+    if not fed.empty:
+        fed_last = fed.iloc[-1]
+        target = f"{fed_last['MålFra']:.2f}-{fed_last['MålTil']:.2f}%" if pd.notna(fed_last.get("MålFra")) else "–"
+        c3.metric(
+            "🇺🇸 Fed (EFFR)", f"{fed_last['Rente']:.2f}%",
+            f"målbånd {target}",
+            help="Effective Federal Funds Rate - den faktiske dag-til-dag-rente i USA, styret af Feds målbånd.\n\nKilde: Federal Reserve Bank of New Yorks åbne API (markets.newyorkfed.org). Rå officiel sats.",
+        )
+    if not riks.empty:
+        c4.metric(
+            "🇸🇪 Riksbanken (styringsrente)", f"{float(riks['Rente'].iloc[-1]):.2f}%",
+            f"pr. {riks['Dato'].iloc[-1]:%d.%m.%Y}",
+            help="Riksbankens styringsrente.\n\nKilde: Sveriges Riksbanks åbne SWEA-API (api.riksbank.se), serie SECBREPOEFF. Rå officiel sats.",
+        )
+
+    # ---- Fastkurspolitikken: DK-ECB-spændet -----------------------------------
+    if nb_folio is not None and ecb_dfr is not None:
+        spread = nb_folio - ecb_dfr
+        m1, m2, m3 = st.columns(3)
+        m1.metric(
+            "Rentespænd DK - ECB", f"{spread:+.2f} pct.point",
+            help="Forskellen mellem Nationalbankens foliorente og ECB's indlånsrente.\n\nKilder: DST DNRENTD og ECB Data Portal. Egen beregning: simpel differens - bemærk enheden er procentPOINT, ikke procent.",
+        )
+        if inflation is not None:
+            m2.metric(
+                "🇩🇰 Inflation (å/å)", f"{inflation:.1f}%",
+                f"seneste: {inflation_month}",
+                help="Årsstigning i forbrugerprisindekset.\n\nKilde: Danmarks Statistik PRIS01, DST's eget beregnede år-til-år-tal. ECB's (og dermed reelt Danmarks) mål er 2%.",
+            )
+            m3.metric(
+                "Realrente (folio - inflation)", f"{(nb_folio - inflation):+.1f}%",
+                help="Foliorenten minus inflationen - den reale forrentning af 'sikre' penge.\n\nKilder: DST DNRENTD og PRIS01. Egen beregning: simpel differens (Fisher-tilnærmelse). Negativ realrente = kontanter taber købekraft.",
+            )
+        with st.expander("🎓 Lær: fastkurspolitikken - hvorfor Nationalbanken 'bare følger' ECB"):
+            st.markdown(
+                """
+Danmark har siden 1982 ført **fastkurspolitik**: kronen holdes stabil over for euroen
+(7,46 kr. ± en snæver margin). Konsekvensen er, at Nationalbanken *ikke* fører selvstændig
+rentepolitik - den følger ECB, og spændet ovenfor afviger normalt kun fra nul, når kronen er
+under pres. I 2015, da spekulanter væddede på dansk euro-exit, satte Nationalbanken renten helt
+ned til **-0,75%** og stoppede endda salg af statsobligationer - et lærestykke i, hvor langt en
+centralbank vil gå for sin valutabinding. For en dansk investor betyder det: **vil du forudsige
+danske renter, så kig på Frankfurt, ikke København.**
+                """
+            )
+
+    # ---- Historik: 20 års styringsrenter --------------------------------------
+    section_header("2 · HISTORIK", "20 års pengepolitik i én graf",
+                   "Nulrente-årtiet, inflationschokket i 2022 og normaliseringen - fire centralbanker side om side.")
+    fig = go.Figure()
+    cutoff = pd.Timestamp.now() - pd.Timedelta(days=365 * 20)
+    if not nb_hist.empty:
+        folio_hist = nb_hist[nb_hist["Dato"] >= cutoff].sort_values("Dato")
+        fig.add_trace(go.Scatter(x=folio_hist["Dato"], y=folio_hist["Rente"], mode="lines",
+                                 name="🇩🇰 Nationalbanken (folio, måned)", line=dict(color="#b91c1c", width=2, shape="hv")))
+    if not ecb.empty:
+        dfr_hist = ecb[ecb["Instrument"].str.contains("DFR", na=False)].sort_values("Dato")
+        full_dates = pd.date_range(max(dfr_hist["Dato"].min(), cutoff), pd.Timestamp.now(), freq="D")
+        dfr_daily = dfr_hist.set_index("Dato")["Rente"].reindex(full_dates, method="ffill")
+        fig.add_trace(go.Scatter(x=dfr_daily.index, y=dfr_daily.values, mode="lines",
+                                 name="🇪🇺 ECB (DFR)", line=dict(color="#1d4ed8", width=2, shape="hv")))
+    if not fed.empty:
+        fig.add_trace(go.Scatter(x=fed["Dato"], y=fed["Rente"], mode="lines",
+                                 name="🇺🇸 Fed (EFFR, seneste år)", line=dict(color="#047857", width=2, shape="hv")))
+    if not riks.empty:
+        fig.add_trace(go.Scatter(x=riks["Dato"], y=riks["Rente"], mode="lines",
+                                 name="🇸🇪 Riksbanken", line=dict(color="#b45309", width=2, shape="hv")))
+    fig.add_hline(y=0, line_dash="dot", line_color="rgba(128,128,128,0.6)")
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=10), height=430,
+        yaxis=dict(title="Procent p.a.", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+        xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), hovermode="x unified",
+    )
+    st.plotly_chart(fig, width="stretch")
+    source_note(
+        "Kilder: DST DNRENTM (Nationalbanken, månedsobservationer - dagsserien er for tung til live-opslag), "
+        "ECB Data Portal (DFR, ændringsdatoer udfyldt til dagsserie - egen udfyldning med seneste gældende sats), "
+        "NY Fed (EFFR, API'et dækker kun de seneste ~250 bankdage) og Riksbankens SWEA-API. "
+        "Trappeform = satserne ændres kun på beslutningsdatoer."
+    )
+
+    # ---- Transmission: fra styringsrente til din bankkonto --------------------
+    trans = get_bank_transmission()
+    if not trans.empty:
+        section_header("3 · TRANSMISSION", "Fra styringsrente til din privatøkonomi",
+                       "Pengepolitikkens virkning på det, folk faktisk betaler og får i banken.")
+        fig2 = go.Figure()
+        combos = [
+            ("Boligkøb", "Udlån", "Udlånsrente, boligkøb", "#b91c1c"),
+            ("S.14 Husholdninger", "Indlån", "Husholdningers indlånsrente", "#1d4ed8"),
+        ]
+        for sektor, retning, label, color in combos:
+            sub = trans[(trans["SEKTOR"] == sektor) & (trans["UDINDLÅN"] == retning)].sort_values("TID")
+            if not sub.empty:
+                fig2.add_trace(go.Scatter(x=[quarter_to_date(q) for q in sub["TID"]], y=sub["INDHOLD"],
+                                          mode="lines", name=label, line=dict(color=color, width=2.5)))
+        fig2.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10), height=340,
+            yaxis=dict(title="Procent p.a.", showgrid=True, gridcolor="rgba(128,128,128,0.15)"),
+            xaxis=dict(showgrid=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), hovermode="x unified",
+        )
+        st.plotly_chart(fig2, width="stretch")
+        source_note(
+            "Kilde: Danmarks Statistik MPK18 (gennemsnitsrenter i pengeinstitutterne, kvartal). Rå tal - "
+            "ingen egen beregning. Bemærk forsinkelsen og spændet i forhold til styringsrenten ovenfor: "
+            "det er bankernes marginal."
+        )
+        with st.expander("🎓 Lær: hvorfor renten er det vigtigste tal i wealth management"):
+            st.markdown(
+                """
+- **Diskontering:** Alle aktiver - aktier, boliger, obligationer - er fremtidige pengestrømme
+  omregnet til nutidsværdi. Når renten stiger, falder nutidsværdien af alt. Det er derfor både
+  aktier OG boliger faldt i 2022, da renterne steg - "there is no place to hide" ved rentechok.
+- **Vandresøjlen:** Styringsrente → interbankrente → realkredit-/bankrenter → boligpriser og
+  virksomhedsinvesteringer. Grafen ovenfor viser transmissionens sidste led. Bemærk at indlåns-
+  renten altid halter efter udlånsrenten - det spænd er bankernes indtjening.
+- **Varighed (duration):** Jo længere ude i fremtiden dine pengestrømme ligger, jo hårdere
+  rammes de af renteændringer. Vækstaktier og 30-årige obligationer er "lange" aktiver - de er
+  rentefølsomme. Value-aktier og korte obligationer er "korte". En porteføljes rentefølsomhed er
+  et bevidst valg, ikke en tilfældighed.
+            """
+            )
+
+    # ---- Nyheder om renter (maks. 1 time gamle) --------------------------------
+    section_header("4 · NYHEDER", "Rente-nyheder lige nu",
+                   "Kun overskrifter fra navngivne medier, højst 1 time gamle, filtreret for pengepolitik.")
+    rate_news = get_rate_news(max_age_hours=1.0)
+    if rate_news:
+        for art in rate_news:
+            st.markdown(
+                f'''<div class="news-card"><a href="{art["url"]}" target="_blank">{html.escape(art["title"])}</a>
+                <div class="news-meta">{html.escape(art["publisher"])} · {format_relative_time(art["pub_date"])}</div></div>''',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.caption(
+            "Ingen rente-relaterede nyheder fra verificerede medier inden for den seneste time. Det er "
+            "normalt - renteafgørelser kommer få gange om året (ECB ca. hver 6. uge, Fed 8 gange årligt), "
+            "så en tom boks betyder blot, at der ikke sker noget lige nu."
+        )
+    source_note(
+        "Kilde: Yahoo Finance-nyhedsfeed på tværs af makro-tickers (10-årig US-rente, S&P 500, EUR/USD, "
+        "Dow Jones), filtreret på rente-nøgleord og maks. 1 times alder. Egen filtrering - ingen AI-genererede overskrifter."
+    )
+
+    st.markdown("---")
+    st.caption(
+        "Kilder: Danmarks Nationalbank via DST (DNRENTD, MPK18, PRIS01), ECB Data Portal, Federal Reserve "
+        "Bank of New York og Sveriges Riksbank - alle officielle, åbne API'er. Egne beregninger (spænd, "
+        "realrente, dagsudfyldning af ECB-serien) er markeret i de enkelte tooltips. Intet her er "
+        "investeringsrådgivning."
     )
 
 
 show_index_ranking(INDEX_CONFIGS)
 
-tab_labels = [build_tab_label(config) for config in INDEX_CONFIGS] + ["💼 Porteføljer", "🏠 Boligmarked"]
+tab_labels = [build_tab_label(config) for config in INDEX_CONFIGS] + ["💼 Porteføljer", "🏠 Boligmarked", "🏦 Centralbanker"]
 tabs = st.tabs(tab_labels)
 
-for tab, config in zip(tabs[:-2], INDEX_CONFIGS):
+for tab, config in zip(tabs[:-3], INDEX_CONFIGS):
     with tab:
         show_dashboard(config)
 
-with tabs[-2]:
+with tabs[-3]:
     show_portfolios()
 
-with tabs[-1]:
+with tabs[-2]:
     show_housing_market()
+
+with tabs[-1]:
+    show_central_banks()
