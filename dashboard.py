@@ -18,8 +18,11 @@ st.set_page_config(page_title="Live Aktiedashboard", layout="wide")
 st_autorefresh(interval=300_000, key="refresh")  # opdaterer hvert 5. minut. Med 700+ selskaber
 # plus porteføljeberegninger på tværs af valutaer kan en kold gennemkørsel tage et par minutter -
 # et kortere interval risikerer at en ny genberegning starter, før den forrige er færdig, hvilket
-# gjorde appen ustabil tidligere. Live-kurserne på Porteføljer-fanen opdateres stadig hvert 10.
-# sekund uafhængigt af dette (se @st.fragment i show_portfolio_positions_live).
+# gjorde appen ustabil tidligere. Live-kurserne på Porteføljer-fanen opdateres stadig hvert 30.
+# sekund uafhængigt af dette (se @st.fragment i show_portfolio_positions_live) - sat op fra 10
+# sekunder, da den hyppige baggrundsgenkørsel i praksis kunne ophobe tråde på tværs af mange
+# samtidige/genindlæste sessioner og til sidst udtømme trådbudgettet på Streamlit Clouds
+# ressourcebegrænsede container (sås som "RuntimeError... can't start new thread").
 
 st.markdown(
     """
@@ -536,9 +539,9 @@ def get_live_data(tickers: dict) -> pd.DataFrame:
     return _fetch_live_data(tickers)
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=30)
 def get_live_data_fast(tickers: dict) -> pd.DataFrame:
-    """Som get_live_data, men med 10 sekunders cache. Bruges kun til det lille porteføljeunivers
+    """Som get_live_data, men med 30 sekunders cache. Bruges kun til det lille porteføljeunivers
     (et par og tyve selskaber), hvor så hyppig opdatering er praktisk mulig uden at overbelaste
     Yahoo Finance - i modsætning til de store indekslister med op mod 500 selskaber."""
     return _fetch_live_data(tickers)
@@ -553,7 +556,7 @@ def _fetch_shares_outstanding(tickers: dict) -> pd.DataFrame:
             shares = None
         return {"Ticker": symbol, "Aktier udestående": shares}
 
-    with ThreadPoolExecutor(max_workers=30) as executor:
+    with ThreadPoolExecutor(max_workers=15) as executor:
         rows = list(executor.map(fetch_one, tickers.items()))
     return pd.DataFrame(rows)
 
@@ -1241,7 +1244,7 @@ def build_holdings_detail(df_p: pd.DataFrame, per_position: float, period: str) 
         currency = INDEX_CURRENCY.get(row["Kilde"], "DKK")
         return get_price_series_dkk(row["Ticker"], currency, period)
 
-    with ThreadPoolExecutor(max_workers=12) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         price_series = list(executor.map(fetch_one, [r for _, r in df_p.iterrows()]))
 
     for (_, row), prices in zip(df_p.iterrows(), price_series):
@@ -1270,9 +1273,9 @@ def portfolio_value_series_from_holdings(holdings: pd.DataFrame) -> pd.Series:
     return total + holdings["Kontantrest"].sum()
 
 
-@st.fragment(run_every="10s")
+@st.fragment(run_every="30s")
 def show_portfolio_positions_live(all_holdings: dict, per_position: float):
-    """Live-lag (opdateres hvert 10. sekund): aktuel kurs pr. selskab ganges på det faste antal
+    """Live-lag (opdateres hvert 30. sekund): aktuel kurs pr. selskab ganges på det faste antal
     aktier fra købsdagen, så man ser præcis hvor mange kroner der står i hver position lige nu."""
     all_tickers = {}
     for holdings in all_holdings.values():
@@ -1328,7 +1331,7 @@ def show_portfolio_positions_live(all_holdings: dict, per_position: float):
                 column_config={
                     "Antal": st.column_config.NumberColumn(help="Antal HELE aktier købt på købsdagen for de allokerede ~" + f"{per_position:,.0f}".replace(",", ".") + " kr. Egen beregning: afrundet ned (rest står kontant)."),
                     "Købskurs (DKK)": st.column_config.NumberColumn(help="Faktisk lukkekurs på købsdagen, omregnet til DKK med dagens valutakurs. Kilde: Yahoo Finance (kurs + valutakurs)."),
-                    "Kurs nu (DKK)": st.column_config.NumberColumn(help="Seneste handlede kurs (opdateres hvert 10. sek.) × aktuel valutakurs. Kilde: Yahoo Finance."),
+                    "Kurs nu (DKK)": st.column_config.NumberColumn(help="Seneste handlede kurs (opdateres hvert 30. sek.) × aktuel valutakurs. Kilde: Yahoo Finance."),
                     "Værdi nu": st.column_config.Column(help="Antal aktier × kurs nu + kontantrest fra købsdagen. Egen beregning."),
                     "Afkast": st.column_config.Column(help="Værdi nu minus investeret beløb (aktier × købskurs + kontantrest). Egen beregning."),
                     "Afkast %": st.column_config.NumberColumn(help="Afkast i procent af det investerede beløb. Egen beregning."),
@@ -1341,7 +1344,7 @@ def show_portfolio_positions_live(all_holdings: dict, per_position: float):
             st.caption(f"Gns. korrelation med S&P 500: {holdings['Korrelation'].mean():+.2f} · kontant: {format_amount_dkk(holdings['Kontantrest'].sum())}")
 
     now_str = datetime.now(ZoneInfo("Europe/Copenhagen")).strftime("%H:%M:%S")
-    st.caption(f"Kurser og positionsværdier opdateres hvert 10. sekund · sidst opdateret kl. {now_str} (dansk tid).")
+    st.caption(f"Kurser og positionsværdier opdateres hvert 30. sekund · sidst opdateret kl. {now_str} (dansk tid).")
 
 
 def show_portfolios():
@@ -1479,7 +1482,7 @@ def show_portfolios():
 
     # ---- Beholdninger med live positionsværdier -------------------------------
     section_header("BEHOLDNINGER", "Hver position lige nu - antal aktier, værdi og afkast",
-                   "Antal aktier ligger fast fra købsdagen. Værdien opdateres live hvert 10. sekund.")
+                   "Antal aktier ligger fast fra købsdagen. Værdien opdateres live hvert 30. sekund.")
     show_portfolio_positions_live(all_holdings, per_position)
 
 
